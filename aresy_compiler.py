@@ -45,10 +45,10 @@ TOKEN_SPEC = [
     ("INT",      r"\d+"),
     ("STRING",   r'"[^"]*"'),
     ("ID",       r"[A-Za-z_][A-Za-z0-9_]*"),
+    ("COMMENT",  r"//.*"),
     ("OP",       r"==|!=|<=|>=|[+\-*/%=<>(){}\[\],]"),
     ("NEWLINE",  r"\n"),
     ("SKIP",     r"[ \t]+"),
-    ("COMMENT",  r"//.*"),
 ]
 MASTER_RE = re.compile("|".join(f"(?P<{n}>{p})" for n, p in TOKEN_SPEC))
 KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false"}
@@ -622,240 +622,88 @@ class CodeGen:
         return ret_t, f"%call_{uid}"
 
 
+
 # ---------------------------------------------------------------------------
-# 5. INTERPRETADOR (modo dinâmico — sem LLVM/clang, roda direto em Python)
+# 5. BACKEND NATIVO (clang) — sem interpretador em Python
 # ---------------------------------------------------------------------------
 #
-# Esse modo não gera IR nem binário: ele anda pela AST e executa na hora.
-# É o que dá suporte ao "python arquivo.ay" e ao REPL interativo (aresy sem
-# argumentos, tipo digitar "python" no Termux). Variáveis aqui não têm tipo
-# fixo (i64/double deixam de existir — é tudo número/bool/lista/string do
-# Python por baixo dos panos), então isso é mais permissivo que o compilador:
-# coisas como "1 + 2.0" ou passar float pra função funcionam sem reclamar.
+# "aresy programa.ay" e o REPL não interpretam nada em Python: os dois geram
+# LLVM IR de verdade (a mesma coisa que "aresy build" gera) e chamam o clang
+# por baixo dos panos pra virar binário nativo, executam esse binário e
+# limpam os arquivos temporários depois. A diferença pro "build" é só que
+# aqui isso é automático — você não precisa chamar o clang na mão.
 
-import math
-import random as _random
-import time as _time
+import os
+import shutil
+import subprocess
+import tempfile
 
 
-class AresyRuntimeError(Exception):
+def find_clang():
+    for candidate in ("clang", "clang-19", "clang-18", "clang-17", "clang-16"):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
+class NativeError(Exception):
     pass
 
 
-class ReturnSignal(Exception):
-    def __init__(self, value): self.value = value
+def compile_ir_to_binary(clang_path, ir_source, out_path, target_triple=None, opt_level="-O2"):
+    with tempfile.TemporaryDirectory() as td:
+        ll_path = os.path.join(td, "prog.ll")
+        with open(ll_path, "w") as f:
+            f.write(ir_source)
+        cmd = [clang_path, opt_level, ll_path, "-lm", "-o", out_path]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise NativeError(proc.stderr.strip() or "clang falhou ao compilar")
 
 
-class Interpreter:
-    def __init__(self):
-        self.functions = {}   # nome -> FuncDef
-        self.globals = {}     # variáveis do escopo top-level (persistem no REPL)
-
-    def run_program(self, stmts):
-        """Executa uma lista de statements no escopo global (usado no REPL,
-        um bloco por vez, e também pra rodar um arquivo inteiro)."""
-        result = None
-        for s in stmts:
-            if isinstance(s, FuncDef):
-                self.functions[s.name] = s
-                result = None
-            else:
-                result = self.exec_stmt(s, self.globals)
-        return result
-
-    def run_file(self, stmts):
-        """Registra as funções e chama main(), como o binário compilado faz."""
-        for s in stmts:
-            if isinstance(s, FuncDef):
-                self.functions[s.name] = s
-        if "main" not in self.functions:
-            raise AresyRuntimeError("Programa precisa de uma função main()")
+def run_file_native(path, target_triple=None):
+    clang_path = find_clang()
+    if not clang_path:
+        print("clang não encontrado. Instala com: pkg install clang")
+        sys.exit(1)
+    with open(path) as f:
+        src = f.read()
+    try:
+        ir = compile_source(src, target_triple=target_triple)
+    except (CompileError, SyntaxError) as e:
+        print(f"Erro de compilação: {e}")
+        sys.exit(1)
+    with tempfile.TemporaryDirectory() as td:
+        bin_path = os.path.join(td, "programa")
         try:
-            self.call_function("main", [])
-        except ReturnSignal:
-            pass
-
-    def call_function(self, name, args):
-        if name not in self.functions:
-            raise AresyRuntimeError(f"Função '{name}' não existe")
-        fn = self.functions[name]
-        if len(fn.params) != len(args):
-            raise AresyRuntimeError(
-                f"'{name}' espera {len(fn.params)} argumento(s), recebeu {len(args)}")
-        scope = dict(zip(fn.params, args))
-        try:
-            for s in fn.body:
-                self.exec_stmt(s, scope)
-        except ReturnSignal as r:
-            return r.value
-        return 0
-
-    # ---- statements ----
-    def exec_stmt(self, node, scope):
-        if isinstance(node, VarDecl):
-            scope[node.name] = self.eval_expr(node.expr, scope)
-            return None
-
-        if isinstance(node, Assign):
-            if node.name not in scope:
-                raise AresyRuntimeError(
-                    f"Variável '{node.name}' não declarada — use 'var {node.name} = ...' primeiro")
-            scope[node.name] = self.eval_expr(node.expr, scope)
-            return None
-
-        if isinstance(node, IndexSet):
-            arr = self._get_array(node.arr, scope)
-            idx = int(self.eval_expr(node.idx, scope))
-            self._check_bounds(arr, idx, node.arr)
-            arr[idx] = self.eval_expr(node.expr, scope)
-            return None
-
-        if isinstance(node, Print):
-            if isinstance(node.expr, Str):
-                print(node.expr.value)
-            else:
-                v = self.eval_expr(node.expr, scope)
-                print(self._fmt(v))
-            return None
-
-        if isinstance(node, If):
-            if self._truthy(self.eval_expr(node.cond, scope)):
-                for s in node.then_b: self.exec_stmt(s, scope)
-            else:
-                for s in node.else_b: self.exec_stmt(s, scope)
-            return None
-
-        if isinstance(node, While):
-            while self._truthy(self.eval_expr(node.cond, scope)):
-                for s in node.body: self.exec_stmt(s, scope)
-            return None
-
-        if isinstance(node, Return):
-            v = self.eval_expr(node.expr, scope) if node.expr is not None else 0
-            raise ReturnSignal(v)
-
-        if isinstance(node, ExprStmt):
-            return self.eval_expr(node.expr, scope)
-
-        raise AresyRuntimeError(f"Statement não suportado no interpretador: {node}")
-
-    # ---- expressions ----
-    def eval_expr(self, node, scope):
-        if isinstance(node, Num):
-            return node.value
-        if isinstance(node, Bool):
-            return node.value
-        if isinstance(node, Str):
-            return node.value
-        if isinstance(node, Var):
-            if node.name not in scope:
-                raise AresyRuntimeError(f"Variável '{node.name}' usada antes de declarar")
-            return scope[node.name]
-        if isinstance(node, UnaryOp):
-            v = self.eval_expr(node.operand, scope)
-            return -v
-        if isinstance(node, BinOp):
-            l = self.eval_expr(node.left, scope)
-            r = self.eval_expr(node.right, scope)
-            return self._binop(node.op, l, r)
-        if isinstance(node, IndexGet):
-            arr = self._get_array(node.arr, scope)
-            idx = int(self.eval_expr(node.idx, scope))
-            self._check_bounds(arr, idx, node.arr)
-            return arr[idx]
-        if isinstance(node, Call):
-            return self._call(node, scope)
-        raise AresyRuntimeError(f"Expressão não suportada no interpretador: {node}")
-
-    def _get_array(self, name, scope):
-        if name not in scope:
-            raise AresyRuntimeError(f"Variável '{name}' usada antes de declarar")
-        v = scope[name]
-        if not isinstance(v, list):
-            raise AresyRuntimeError(f"'{name}' não é um array")
-        return v
-
-    def _check_bounds(self, arr, idx, name):
-        if idx < 0 or idx >= len(arr):
-            raise AresyRuntimeError(
-                f"Índice {idx} fora dos limites de '{name}' (tamanho {len(arr)})")
-
-    def _binop(self, op, l, r):
-        if op == "+": return l + r
-        if op == "-": return l - r
-        if op == "*": return l * r
-        if op == "/":
-            if isinstance(l, float) or isinstance(r, float):
-                return l / r
-            if r == 0:
-                raise AresyRuntimeError("Divisão por zero")
-            # divisão inteira truncada em direção a zero, igual ao sdiv do LLVM
-            q = abs(l) // abs(r)
-            return q if (l < 0) == (r < 0) else -q
-        if op == "%":
-            if isinstance(l, float) or isinstance(r, float):
-                raise AresyRuntimeError("'%' (módulo) não é suportado com float")
-            if r == 0:
-                raise AresyRuntimeError("Módulo por zero")
-            rem = abs(l) % abs(r)
-            return rem if l >= 0 else -rem
-        if op == "==": return l == r
-        if op == "!=": return l != r
-        if op == "<": return l < r
-        if op == ">": return l > r
-        if op == "<=": return l <= r
-        if op == ">=": return l >= r
-        raise AresyRuntimeError(f"Operador não suportado: {op}")
-
-    def _truthy(self, v):
-        return bool(v)
-
-    def _fmt(self, v):
-        if isinstance(v, bool):
-            return "1" if v else "0"
-        if isinstance(v, float):
-            return f"{v:.6f}"
-        return str(v)
-
-    def _call(self, node, scope):
-        name = node.name
-        if name == "sqrt":
-            return math.sqrt(self.eval_expr(node.args[0], scope))
-        if name == "time":
-            return _time.time()
-        if name == "random":
-            n = int(self.eval_expr(node.args[0], scope))
-            if n <= 0:
-                raise AresyRuntimeError("random(n) precisa de n > 0")
-            return _random.randrange(n)
-        if name == "array":
-            n = int(self.eval_expr(node.args[0], scope))
-            return [0] * n
-        if name == "input":
-            raw = input()
-            try:
-                return int(raw)
-            except ValueError:
-                try:
-                    return float(raw)
-                except ValueError:
-                    return raw
-        args = [self.eval_expr(a, scope) for a in node.args]
-        return self.call_function(name, args)
-
-
-def interpret_source(source, interpreter=None):
-    """Interpreta um programa completo (precisa ter main())."""
-    tokens = tokenize(source)
-    ast = Parser(tokens).parse_program()
-    interp = interpreter or Interpreter()
-    interp.run_file(ast)
-    return interp
+            compile_ir_to_binary(clang_path, ir, bin_path, target_triple)
+        except NativeError as e:
+            print(f"Erro do clang:\n{e}")
+            sys.exit(1)
+        proc = subprocess.run([bin_path])
+        if proc.returncode != 0:
+            sys.exit(proc.returncode)
 
 
 # ---------------------------------------------------------------------------
 # 6. REPL (modo interativo — "aresy" sem argumentos, tipo digitar "python")
 # ---------------------------------------------------------------------------
+#
+# Cada linha/bloco digitado vira um mini programa aresY, compilado com clang
+# e executado de verdade (nativo, não interpretado). Funções definidas em
+# rounds anteriores são reaproveitadas (o IR já gerado é reusado). Variáveis
+# são "carregadas de volta" a cada round como valores literais — o processo
+# anterior já terminou, então o estado precisa ser serializado e reinjetado.
+#
+# Limitação: arrays (array(n)) só existem dentro do bloco onde foram
+# criados — o ponteiro de malloc de um processo não existe mais no próximo,
+# então uma variável-array não sobrevive entre rounds do REPL. Pra usar
+# arrays de verdade, escreva um arquivo .ay e rode com "aresy build".
+
+STATE_BEGIN = "__AY_STATE_BEGIN__"
+STATE_END = "__AY_STATE_END__"
+
 
 def _brace_balance(text):
     """Conta chaves fora de strings/comentários pra saber se o bloco fechou."""
@@ -879,10 +727,119 @@ def _brace_balance(text):
     return depth
 
 
-def repl():
-    print("aresY — modo interativo (dinâmico, sem compilar pra binário)")
+class ReplSession:
+    def __init__(self, clang_path, target_triple=None):
+        self.clang_path = clang_path
+        self.target_triple = target_triple
+        self.codegen = CodeGen(target_triple=target_triple)
+        self.func_ir = {}       # nome -> IR já gerado da função
+        self.var_types = {}     # nome -> "i64" | "double"
+        self.var_values = {}    # nome -> valor atual conhecido
+        self.array_vars = set()  # variáveis que guardam array (não persistem)
+
+    def _literal(self, t, v):
+        return str(int(v)) if t == "i64" else str(float(v))
+
+    def submit(self, stmts):
+        """Recebe os statements top-level de um bloco do REPL. FuncDefs só
+        são registradas; o resto vira um main() compilado e rodado na hora.
+        Retorna (saida_do_usuario, codigo_de_saida) ou None se não rodou
+        nada (bloco só definiu função)."""
+        new_stmts = []
+        for s in stmts:
+            if isinstance(s, FuncDef):
+                self.codegen.functions[s.name] = {
+                    "params": s.params,
+                    "ret": self.codegen._scan_return_type(s.body),
+                }
+                self.func_ir[s.name] = self.codegen.gen_function(s)
+            else:
+                new_stmts.append(s)
+
+        if not new_stmts:
+            return None
+
+        # eco automático: expressão solta no fim vira print (tipo REPL do python)
+        if isinstance(new_stmts[-1], ExprStmt):
+            new_stmts[-1] = Print(new_stmts[-1].expr)
+
+        env = {}
+        lines = []
+
+        # reinjeta variáveis de rounds anteriores como literais
+        for name, t in self.var_types.items():
+            if name in self.array_vars:
+                continue
+            v = self.var_values[name]
+            lines.append(f"  %{name} = alloca {t}, align 8")
+            lines.append(f"  store {t} {self._literal(t, v)}, {t}* %{name}, align 8")
+            env[name] = t
+
+        for s in new_stmts:
+            if isinstance(s, VarDecl):
+                if s.name in env:
+                    # redeclaração vira reatribuição (o tipo já existente é mantido)
+                    s = Assign(s.name, s.expr)
+                else:
+                    self.array_vars.discard(s.name)
+                    if isinstance(s.expr, Call) and s.expr.name == "array":
+                        self.array_vars.add(s.name)
+            self.codegen.gen_stmt(s, env, lines, "i32")
+
+        trackable = [n for n in env if n not in self.array_vars]
+        self.codegen.gen_stmt(Print(Str('"' + STATE_BEGIN + '"')), env, lines, "i32")
+        for name in trackable:
+            self.codegen.gen_stmt(Print(Var(name)), env, lines, "i32")
+        self.codegen.gen_stmt(Print(Str('"' + STATE_END + '"')), env, lines, "i32")
+
+        body = "define i32 @main() {\nentry:\n" + "\n".join(lines) + "\n  ret i32 0\n}"
+
+        header = ""
+        if self.target_triple:
+            header += f'target triple = "{self.target_triple}"\n'
+        header += BUILTIN_DECLARES + FMT_CONSTANTS + "\n"
+        ir = (header + "\n".join(self.codegen.strings) + "\n"
+              + "\n".join(self.func_ir.values()) + "\n" + body)
+
+        with tempfile.TemporaryDirectory() as td:
+            bin_path = os.path.join(td, "repl_bin")
+            # -O0 no REPL: o programa roda uma vez só e é minúsculo, então
+            # otimizar não ganha nada em runtime — só custa tempo de clang
+            # a cada Enter. "aresy build"/"aresy arquivo.ay" continuam em
+            # -O2 (compile_ir_to_binary usa -O2 por padrão), que é onde a
+            # otimização realmente importa (binário reaproveitado/rodado
+            # várias vezes ou por mais tempo).
+            compile_ir_to_binary(self.clang_path, ir, bin_path, self.target_triple, opt_level="-O0")
+            proc = subprocess.run([bin_path], capture_output=True, text=True)
+
+        out = proc.stdout
+        if STATE_BEGIN in out:
+            before, rest = out.split(STATE_BEGIN, 1)
+            state_part = rest.split(STATE_END, 1)[0]
+            state_lines = [l for l in state_part.strip("\n").split("\n") if l != ""]
+        else:
+            before, state_lines = out, []
+
+        for name, line in zip(trackable, state_lines):
+            t = env[name]
+            try:
+                self.var_values[name] = int(line) if t == "i64" else float(line)
+                self.var_types[name] = t
+            except ValueError:
+                pass
+
+        return before, proc.returncode
+
+
+def repl(target_triple=None):
+    clang_path = find_clang()
+    if not clang_path:
+        print("clang não encontrado. Instala com: pkg install clang")
+        sys.exit(1)
+
+    print("aresY — modo interativo (compila e roda nativo via clang)")
     print("Ctrl+D ou Ctrl+C pra sair.\n")
-    interp = Interpreter()
+    session = ReplSession(clang_path, target_triple=target_triple)
     buf = ""
     prompt = ">>> "
     while True:
@@ -914,15 +871,15 @@ def repl():
         try:
             tokens = tokenize(buf_to_run)
             ast = Parser(tokens).parse_program()
-            result = interp.run_program(ast)
+            result = session.submit(ast)
             if result is not None:
-                print(interp._fmt(result))
+                out, rc = result
+                if out:
+                    print(out, end="" if out.endswith("\n") else "\n")
         except (CompileError, SyntaxError) as e:
             print(f"Erro de sintaxe: {e}")
-        except AresyRuntimeError as e:
-            print(f"Erro: {e}")
-        except ZeroDivisionError:
-            print("Erro: divisão por zero")
+        except NativeError as e:
+            print(f"Erro do clang:\n{e}")
 
 
 # ---------------------------------------------------------------------------
@@ -935,21 +892,8 @@ def compile_source(source, target_triple=None):
     return CodeGen(target_triple=target_triple).compile_program(ast)
 
 
-def _run_file_dynamic(path):
-    with open(path) as f:
-        src = f.read()
-    try:
-        interpret_source(src)
-    except (CompileError, SyntaxError) as e:
-        print(f"Erro de sintaxe: {e}")
-        sys.exit(1)
-    except AresyRuntimeError as e:
-        print(f"Erro: {e}")
-        sys.exit(1)
-
-
 def _build_native(argv):
-    # uso antigo: python aresy_compiler.py build programa.ay [saida.ll] [--triple TRIPLE]
+    # python aresy_compiler.py build programa.ay [saida.ll] [--triple TRIPLE]
     if len(argv) < 1:
         print("Uso: aresy build programa.ay [saida.ll] [--triple TRIPLE]")
         sys.exit(1)
@@ -969,33 +913,45 @@ def _build_native(argv):
     print(f"IR gerado em {out_path}. Compile com:\n  clang -O3 -ffast-math {out_path} -lm -o programa")
 
 
+def _extract_triple(argv):
+    triple = None
+    rest = list(argv)
+    if "--triple" in rest:
+        i = rest.index("--triple")
+        triple = rest[i + 1]
+        del rest[i:i + 2]
+    return triple, rest
+
+
 def _usage():
     print(
         "Uso:\n"
-        "  aresy                         entra no modo interativo (REPL)\n"
-        "  aresy programa.ay             interpreta e roda direto (dinâmico)\n"
+        "  aresy                         entra no modo interativo (REPL, nativo via clang)\n"
+        "  aresy programa.ay             compila e roda direto (nativo, sem interpretar)\n"
         "  aresy run programa.ay         mesma coisa, explícito\n"
         "  aresy build programa.ay [saida.ll] [--triple TRIPLE]\n"
-        "                                 gera LLVM IR pra compilar com clang"
+        "                                 gera LLVM IR pra compilar com clang na mão\n"
+        "  (adicione --triple TRIPLE em qualquer comando acima se precisar\n"
+        "   de um target diferente do padrão do seu aparelho)"
     )
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
+    triple, args = _extract_triple(sys.argv[1:])
 
     if len(args) == 0:
-        repl()
+        repl(target_triple=triple)
     elif args[0] == "build":
-        _build_native(args[1:])
+        _build_native(args[1:] + (["--triple", triple] if triple else []))
     elif args[0] == "run":
         if len(args) < 2:
             _usage()
             sys.exit(1)
-        _run_file_dynamic(args[1])
+        run_file_native(args[1], target_triple=triple)
     elif args[0] in ("-h", "--help"):
         _usage()
     elif args[0].endswith(".ay"):
-        _run_file_dynamic(args[0])
+        run_file_native(args[0], target_triple=triple)
     else:
         _usage()
         sys.exit(1)
