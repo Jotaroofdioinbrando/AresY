@@ -1,0 +1,37 @@
+fn soma(a, b) {
+    return a + b
+}
+
+fn media(a, b) {
+    return (a + b) / 2
+}
+
+fn main() {
+    var x = 10
+    var y = soma(x, 5)
+    print(y)
+
+    var arr = array(5)
+    arr[0] = y
+    arr[1] = arr[0] % 4
+
+    if arr[1] > 1 {
+        print(arr[1])
+    } else {
+        print(0)
+    }
+
+    var i = 0
+    while i < 3 {
+        print(i)
+        i = i + 1
+    }
+
+    var raiz = sqrt(2.0)
+    print(raiz)
+
+    var m = media(10, 3)
+    print(m)
+
+    return 0
+}
