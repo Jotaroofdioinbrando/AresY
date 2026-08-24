@@ -53,7 +53,8 @@ TOKEN_SPEC = [
     ("SKIP",     r"[ \t]+"),
 ]
 MASTER_RE = re.compile("|".join(f"(?P<{n}>{p})" for n, p in TOKEN_SPEC))
-KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false", "extern", "import"}
+KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false",
+            "extern", "import", "try", "catch", "throw"}
 
 # Nomes de tipo aceitos em anotações (fn e extern). Mapeiam pro vocabulário
 # interno do compilador: "i64", "double", "str", "void".
@@ -155,6 +156,11 @@ class ExternDecl:
         self.name, self.param_types, self.ret_type = name, param_types, ret_type
 class ImportDecl:
     def __init__(self, name): self.name = name
+class TryCatch:
+    def __init__(self, try_body, catch_var, catch_body):
+        self.try_body, self.catch_var, self.catch_body = try_body, catch_var, catch_body
+class Throw:
+    def __init__(self, expr): self.expr = expr
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +225,10 @@ class Parser:
         if tok.kind == "FN": return self.parse_funcdef()
         if tok.kind == "IF": return self.parse_if()
         if tok.kind == "WHILE": return self.parse_while()
+        if tok.kind == "TRY": return self.parse_try()
+        if tok.kind == "THROW":
+            self.advance()
+            return Throw(self.parse_expr())
         if tok.kind == "VAR":
             self.advance()
             name = self.expect("ID").value
@@ -300,6 +310,14 @@ class Parser:
         cond = self.parse_expr()
         body = self.parse_block()
         return While(cond, body)
+
+    def parse_try(self):
+        self.advance()  # try
+        try_body = self.parse_block()
+        self.expect("CATCH")
+        catch_var = self.expect("ID").value
+        catch_body = self.parse_block()
+        return TryCatch(try_body, catch_var, catch_body)
 
     def parse_expr(self): return self.parse_comparison()
 
@@ -408,12 +426,30 @@ BUILTIN_DECLARES = (
     'declare double @floor(double)\n'
     'declare double @ceil(double)\n'
     'declare double @fabs(double)\n'
+    # --- Erros/exceções (try/catch/throw) ---
+    'declare i32 @sprintf(i8*, i8*, ...)\n'
+    'declare void @exit(i32)\n'
 )
 FMT_CONSTANTS = (
     '@fmt_int = private unnamed_addr constant [5 x i8] c"%ld\\0A\\00"\n'
     '@fmt_float = private unnamed_addr constant [4 x i8] c"%f\\0A\\00"\n'
     '@fmt_str = private unnamed_addr constant [4 x i8] c"%s\\0A\\00"\n'
     '@fmt_scan = private unnamed_addr constant [4 x i8] c"%ld\\00"\n'
+    # formatos "crus" (sem \n), usados só pra converter número -> string
+    # dentro de throw (ex.: "throw 42" vira a string "42")
+    '@fmt_int_raw = private unnamed_addr constant [4 x i8] c"%ld\\00"\n'
+    '@fmt_float_raw = private unnamed_addr constant [3 x i8] c"%f\\00"\n'
+    '@fmt_uncaught = private unnamed_addr constant [25 x i8] '
+    'c"Excecao nao tratada: %s\\0A\\00"\n'
+)
+# Estado global de exceção: uma flag (0/1) + a mensagem (sempre uma string).
+# É um mecanismo simples de propagação por "código de erro" — sem
+# invoke/landingpad de verdade — mas cobre o caso comum de throw dentro
+# de um try, e também throw dentro de uma função chamada de dentro do try
+# (cada call site verifica a flag logo depois de chamar).
+EXC_GLOBALS = (
+    "@__ares_exc_flag = global i32 0\n"
+    "@__ares_exc_msg = global i8* null\n"
 )
 
 class CompileError(Exception):
@@ -438,6 +474,8 @@ class CodeGen:
         self.strings = []
         self.functions = {}   # name -> {'params': [...], 'ret': 'i64'|'double'|'void', 'extern': bool}
         self.imports = []     # nomes de libs de "import" (viram -lNOME na hora de linkar)
+        self.catch_stack = []      # labels dos catch ativos (mais interno primeiro), por função
+        self.func_exc_exit = None  # label pra onde pular se uma exceção escapar de todo try da função atual
 
     def new_id(self):
         self.counter += 1
@@ -512,7 +550,7 @@ class CodeGen:
         header = ""
         if self.target_triple:
             header += f'target triple = "{self.target_triple}"\n'
-        header += BUILTIN_DECLARES + FMT_CONSTANTS + "\n" + "\n".join(extern_ir) + "\n"
+        header += BUILTIN_DECLARES + FMT_CONSTANTS + EXC_GLOBALS + "\n" + "\n".join(extern_ir) + "\n"
         return header + "\n".join(self.strings) + "\n" + "\n".join(body_ir)
 
     def gen_function(self, node):
@@ -528,6 +566,14 @@ class CodeGen:
         )
         lines.append(f"define {llvm_ret} @{node.name}({params_sig}) {{")
         lines.append("entry:")
+
+        # label pra onde uma exceção "escapada" (sem catch ativo nesta função)
+        # deve pular; em main isso é o handler de exceção não tratada, nas
+        # outras funções é um retorno antecipado que devolve o controle pro
+        # chamador (que por sua vez verifica a flag global logo após a call).
+        func_uid = self.new_id()
+        self.func_exc_exit = f"func_exc_exit_{func_uid}"
+        self.catch_stack = []
 
         if is_main:
             if self.use_gc:
@@ -562,6 +608,30 @@ class CodeGen:
             lines.append("  ret i8* null")
         else:
             lines.append("  ret i64 0")
+
+        # bloco de saída por exceção não capturada nesta função. Só fica
+        # "vivo" de verdade se algum throw/call dentro da função apontar
+        # pra cá (ver Throw e as checagens pós-call em gen_call); se não
+        # houver nenhum try/throw/call que possa lançar, esse bloco fica
+        # inalcançável e o clang simplesmente descarta ele no -O2.
+        lines.append(f"{self.func_exc_exit}:")
+        if is_main:
+            uid = self.new_id()
+            lines.append(f"  %excmsg_top_{uid} = load i8*, i8** @__ares_exc_msg")
+            lines.append(f"  %fmtp_{uid} = getelementptr [25 x i8], [25 x i8]* @fmt_uncaught, i32 0, i32 0")
+            lines.append(f"  call i32 (i8*, ...) @printf(i8* %fmtp_{uid}, i8* %excmsg_top_{uid})")
+            lines.append("  call void @exit(i32 1)")
+            lines.append("  unreachable")
+        elif llvm_ret == "void":
+            lines.append("  ret void")
+        elif llvm_ret == "i32":
+            lines.append("  ret i32 0")
+        elif llvm_ret == "double":
+            lines.append("  ret double 0.0")
+        elif llvm_ret == "i8*":
+            lines.append("  ret i8* null")
+        else:
+            lines.append("  ret i64 0")
         lines.append("}")
         return "\n".join(lines)
 
@@ -582,6 +652,23 @@ class CodeGen:
         else:
             return value_reg  # tipos iguais ou combinação não esperada
         return f"%cast_{uid}"
+
+    def to_str(self, lines, t, v):
+        # usado por "throw": garante que o valor lançado vire uma string,
+        # convertendo números automaticamente (throw 42 -> "42").
+        if t == "str":
+            return v
+        uid = self.new_id()
+        alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+        lines.append(f"  %tsbuf_{uid} = call i8* {alloc_fn}(i64 64)")
+        if t == "double":
+            lines.append(f"  %tsfmt_{uid} = getelementptr [3 x i8], [3 x i8]* @fmt_float_raw, i32 0, i32 0")
+            lines.append(f"  call i32 (i8*, i8*, ...) @sprintf(i8* %tsbuf_{uid}, i8* %tsfmt_{uid}, double {v})")
+        else:
+            v = self.cast(lines, t, v, "i64")
+            lines.append(f"  %tsfmt_{uid} = getelementptr [4 x i8], [4 x i8]* @fmt_int_raw, i32 0, i32 0")
+            lines.append(f"  call i32 (i8*, i8*, ...) @sprintf(i8* %tsbuf_{uid}, i8* %tsfmt_{uid}, i64 {v})")
+        return f"%tsbuf_{uid}"
 
     def gen_stmt(self, node, env, lines, func_ret_type):
         if isinstance(node, VarDecl):
@@ -662,6 +749,38 @@ class CodeGen:
             for s in node.body: self.gen_stmt(s, env, lines, func_ret_type)
             lines.append(f"  br label %c_{uid}")
             lines.append(f"be_{uid}:")
+
+        elif isinstance(node, TryCatch):
+            uid = self.new_id()
+            catch_label = f"catch_{uid}"
+            end_label = f"try_end_{uid}"
+            self.catch_stack.append(catch_label)
+            for s in node.try_body:
+                self.gen_stmt(s, env, lines, func_ret_type)
+            self.catch_stack.pop()
+            lines.append(f"  br label %{end_label}")
+            lines.append(f"{catch_label}:")
+            # zera a flag (a exceção foi capturada aqui) e expõe a mensagem
+            # na variável declarada em "catch <nome>" (sempre tipo str).
+            lines.append("  store i32 0, i32* @__ares_exc_flag")
+            lines.append(f"  %{node.catch_var} = alloca i8*, align 8")
+            lines.append(f"  %excmsg_{uid} = load i8*, i8** @__ares_exc_msg")
+            lines.append(f"  store i8* %excmsg_{uid}, i8** %{node.catch_var}, align 8")
+            env[node.catch_var] = "str"
+            for s in node.catch_body:
+                self.gen_stmt(s, env, lines, func_ret_type)
+            lines.append(f"  br label %{end_label}")
+            lines.append(f"{end_label}:")
+
+        elif isinstance(node, Throw):
+            t, v = self.gen_expr(node.expr, env, lines)
+            v = self.to_str(lines, t, v)
+            lines.append(f"  store i8* {v}, i8** @__ares_exc_msg")
+            lines.append("  store i32 1, i32* @__ares_exc_flag")
+            target = self.catch_stack[-1] if self.catch_stack else self.func_exc_exit
+            lines.append(f"  br label %{target}")
+            uid = self.new_id()
+            lines.append(f"unreachable_thr_{uid}:")  # bloco morto p/ manter IR válido após br
 
         elif isinstance(node, Return):
             if node.expr is None:
@@ -953,12 +1072,33 @@ class CodeGen:
             v = self.cast(lines, t, v, param_t)
             arg_strs.append(f"{param_t} {v}")
         ret_t = sig["ret"]
+        is_extern = sig.get("extern", False)
         if ret_t == "void":
             lines.append(f"  call void @{name}({', '.join(arg_strs)})")
+            if not is_extern:
+                self._emit_exc_check(lines, uid)
             return "i64", "0"
         ret_llvm = self.llvm_type(ret_t)
         lines.append(f"  %call_{uid} = call {ret_llvm} @{name}({', '.join(arg_strs)})")
+        if not is_extern:
+            self._emit_exc_check(lines, uid)
         return ret_t, f"%call_{uid}"
+
+    def _emit_exc_check(self, lines, uid):
+        # Chamado logo depois de QUALQUER call a uma função aresY (não
+        # extern): se a função chamada (ou algo mais fundo na pilha de
+        # chamadas dela) deu throw sem capturar, a flag global fica ligada.
+        # Aqui a gente detecta isso e pula direto pro catch ativo (se
+        # estivermos dentro de um try) ou pro retorno antecipado da função
+        # atual (propagando a exceção mais um nível pra cima). É assim que
+        # o throw "atravessa" chamadas de função sem precisar de
+        # invoke/landingpad de verdade.
+        target = self.catch_stack[-1] if self.catch_stack else self.func_exc_exit
+        cont_label = f"exc_cont_{uid}"
+        lines.append(f"  %excf_{uid} = load i32, i32* @__ares_exc_flag")
+        lines.append(f"  %excc_{uid} = icmp ne i32 %excf_{uid}, 0")
+        lines.append(f"  br i1 %excc_{uid}, label %{target}, label %{cont_label}")
+        lines.append(f"{cont_label}:")
 
 
 
@@ -1137,6 +1277,13 @@ class ReplSession:
         if self.use_gc:
             lines.append("  call void @GC_init()")
 
+        # mesmo esquema de exceções do modo arquivo (ver gen_function):
+        # precisa ser configurado aqui manualmente porque o REPL monta o
+        # "main" desse round na mão, sem passar por gen_function.
+        func_uid = self.codegen.new_id()
+        self.codegen.func_exc_exit = f"func_exc_exit_{func_uid}"
+        self.codegen.catch_stack = []
+
         # reinjeta variáveis de rounds anteriores como literais
         for name, t in self.var_types.items():
             if name in self.array_vars:
@@ -1179,12 +1326,21 @@ class ReplSession:
             self.codegen.gen_stmt(Print(Var(name)), env, lines, "i32")
         self.codegen.gen_stmt(Print(Str('"' + STATE_END + '"')), env, lines, "i32")
 
-        body = "define i32 @main() {\nentry:\n" + "\n".join(lines) + "\n  ret i32 0\n}"
+        exc_exit_block = (
+            f"{self.codegen.func_exc_exit}:\n"
+            f"  %excmsg_top_{func_uid} = load i8*, i8** @__ares_exc_msg\n"
+            f"  %fmtp_{func_uid} = getelementptr [25 x i8], [25 x i8]* @fmt_uncaught, i32 0, i32 0\n"
+            f"  call i32 (i8*, ...) @printf(i8* %fmtp_{func_uid}, i8* %excmsg_top_{func_uid})\n"
+            "  call void @exit(i32 1)\n"
+            "  unreachable"
+        )
+        body = ("define i32 @main() {\nentry:\n" + "\n".join(lines)
+                + "\n  ret i32 0\n" + exc_exit_block + "\n}")
 
         header = ""
         if self.target_triple:
             header += f'target triple = "{self.target_triple}"\n'
-        header += BUILTIN_DECLARES + FMT_CONSTANTS + "\n" + "\n".join(self.extern_ir) + "\n"
+        header += BUILTIN_DECLARES + FMT_CONSTANTS + EXC_GLOBALS + "\n" + "\n".join(self.extern_ir) + "\n"
         ir = (header + "\n".join(self.codegen.strings) + "\n"
               + "\n".join(self.func_ir.values()) + "\n" + body)
 

@@ -1,0 +1,8 @@
+fn main() {
+    try {
+        throw 42
+    } catch e {
+        print("número virou string: " + e)
+    }
+    return 0
+}

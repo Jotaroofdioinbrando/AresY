@@ -1,0 +1,17 @@
+fn divide(a, b) {
+    if b == 0 {
+        throw "divisao por zero"
+    }
+    return a / b
+}
+
+fn main() {
+    try {
+        var r = divide(10, 0)
+        print(r)
+    } catch e {
+        print("Erro capturado: " + e)
+    }
+    print("depois do try, programa continua normal")
+    return 0
+}

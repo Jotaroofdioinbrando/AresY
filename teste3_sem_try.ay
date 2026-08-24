@@ -1,0 +1,5 @@
+fn main() {
+    throw "essa exceção não tem catch nenhum"
+    print(999)
+    return 0
+}
