@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# LLVM / builds
+*.ll
+programa
+programa2
+programa_cpp
+
+# Executáveis gerados pelos testes
+*_cpp
+teste_backslash
+*.out
+
+# C/C++ compilados
+*.o
+*.obj
+
+# Arquivos temporários/testes locais
+*.tmp
+*.bak
+*.swp
+*~
+
+# Backups locais do compilador
+aresy_compiler_backup_*.py
+
+# Arquivos de saída/testes locais
+teste.txt
+teste_aresy.txt
+teste_ay_saida.txt
+dados.txt
+

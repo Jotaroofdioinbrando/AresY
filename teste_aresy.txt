@@ -1,1 +1,0 @@
-Linha 1: AresY e muito rapido!\nLinha 2: Testando append_file.\n

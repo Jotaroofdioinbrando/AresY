@@ -1,3 +1,0 @@
-AresY nasceu para ser simples.
-Python é ótimo, mas pode ser lento.
-LLVM deixa a brincadeira interessante.
