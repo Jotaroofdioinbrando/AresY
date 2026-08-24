@@ -1,7 +1,5 @@
-import "modulo_teste.ay"
+import "stdlib/mathx.ay"
 
 fn main() {
-    var x = gritar("ola aresy")
-    print(x)
-    return 0
+    print(sqrt(25.0))
 }

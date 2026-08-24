@@ -1,0 +1,10 @@
+// Ele avisa a AresY que essa função vem do C
+extern fn sqrt(x: f64) -> f64
+
+fn main() {
+    // Agora ele pode usar a função do C direto no código dele!
+    var raiz = sqrt(25.0)
+    print(raiz) // Vai printar 5
+    return 0
+}
+

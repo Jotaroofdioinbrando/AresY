@@ -1,0 +1,188 @@
+import "stdlib/numares.ay"
+
+fn assert_eq(actual: i64, expected: i64, msg: str) {
+    if actual != expected {
+        throw "Falha: " + msg + " (esperado: " + str(expected) + ", obtido: " + str(actual) + ")"
+    }
+}
+
+fn assert_array_eq(actual: i64, expected: i64, msg: str) {
+    var n1 = size(actual)
+    var n2 = size(expected)
+    if n1 != n2 {
+        throw "Falha: " + msg + " (tamanhos diferentes: " + str(n1) + " vs " + str(n2) + ")"
+    }
+    var i = 1
+    while i <= n1 {
+        if actual[i] != expected[i] {
+            throw "Falha: " + msg + " no indice " + str(i-1) + " (esperado: " + str(expected[i]) + ", obtido: " + str(actual[i]) + ")"
+        }
+        i = i + 1
+    }
+}
+
+fn main() {
+    print("Iniciando testes da biblioteca numares...")
+
+    // 1. Teste zeros
+    var z = zeros(5)
+    assert_eq(size(z), 5, "size(zeros(5))")
+    var expected_z = array(6)
+    expected_z[0] = 5
+    expected_z[1] = 0
+    expected_z[2] = 0
+    expected_z[3] = 0
+    expected_z[4] = 0
+    expected_z[5] = 0
+    assert_array_eq(z, expected_z, "zeros(5)")
+
+    // 2. Teste ones
+    var o = ones(3)
+    assert_eq(size(o), 3, "size(ones(3))")
+    var expected_o = array(4)
+    expected_o[0] = 3
+    expected_o[1] = 1
+    expected_o[2] = 1
+    expected_o[3] = 1
+    assert_array_eq(o, expected_o, "ones(3)")
+
+    // 3. Teste full
+    var f = full(4, 42)
+    assert_eq(size(f), 4, "size(full(4, 42))")
+    var expected_f = array(5)
+    expected_f[0] = 4
+    expected_f[1] = 42
+    expected_f[2] = 42
+    expected_f[3] = 42
+    expected_f[4] = 42
+    assert_array_eq(f, expected_f, "full(4, 42)")
+
+    // 4. Teste arange
+    var r1 = arange(0, 10, 2)
+    assert_eq(size(r1), 5, "size(arange(0, 10, 2))")
+    var expected_r1 = array(6)
+    expected_r1[0] = 5
+    expected_r1[1] = 0
+    expected_r1[2] = 2
+    expected_r1[3] = 4
+    expected_r1[4] = 6
+    expected_r1[5] = 8
+    assert_array_eq(r1, expected_r1, "arange(0, 10, 2)")
+
+    var r2 = arange(5, 0, -1)
+    assert_eq(size(r2), 5, "size(arange(5, 0, -1))")
+    var expected_r2 = array(6)
+    expected_r2[0] = 5
+    expected_r2[1] = 5
+    expected_r2[2] = 4
+    expected_r2[3] = 3
+    expected_r2[4] = 2
+    expected_r2[5] = 1
+    assert_array_eq(r2, expected_r2, "arange(5, 0, -1)")
+
+    // 5. Teste sum, amin, amax
+    var arr = array(6)
+    arr[0] = 5
+    arr[1] = 10
+    arr[2] = -5
+    arr[3] = 20
+    arr[4] = 3
+    arr[5] = 15
+
+    assert_eq(sum(arr), 43, "sum(arr)")
+    assert_eq(amin(arr), -5, "amin(arr)")
+    assert_eq(amax(arr), 20, "amax(arr)")
+
+    // 6. Teste add, sub, mul, div
+    var a1 = array(4)
+    a1[0] = 3
+    a1[1] = 10
+    a1[2] = 20
+    a1[3] = 30
+
+    var a2 = array(4)
+    a2[0] = 3
+    a2[1] = 2
+    a2[2] = 4
+    a2[3] = 5
+
+    var res_add = add(a1, a2)
+    var expected_add = array(4)
+    expected_add[0] = 3
+    expected_add[1] = 12
+    expected_add[2] = 24
+    expected_add[3] = 35
+    assert_array_eq(res_add, expected_add, "add(a1, a2)")
+
+    var res_sub = sub(a1, a2)
+    var expected_sub = array(4)
+    expected_sub[0] = 3
+    expected_sub[1] = 8
+    expected_sub[2] = 16
+    expected_sub[3] = 25
+    assert_array_eq(res_sub, expected_sub, "sub(a1, a2)")
+
+    var res_mul = mul(a1, a2)
+    var expected_mul = array(4)
+    expected_mul[0] = 3
+    expected_mul[1] = 20
+    expected_mul[2] = 80
+    expected_mul[3] = 150
+    assert_array_eq(res_mul, expected_mul, "mul(a1, a2)")
+
+    var res_div = div(a1, a2)
+    var expected_div = array(4)
+    expected_div[0] = 3
+    expected_div[1] = 5
+    expected_div[2] = 5
+    expected_div[3] = 6
+    assert_array_eq(res_div, expected_div, "div(a1, a2)")
+
+    // 7. Teste dot
+    var d = dot(a1, a2)
+    assert_eq(d, 250, "dot(a1, a2)")
+
+    // 8. Teste copy, scale, abs_array, clamp_array
+    var c = copy(arr)
+    assert_array_eq(c, arr, "copy(arr)")
+
+    var s = scale(arr, 2)
+    var expected_s = array(6)
+    expected_s[0] = 5
+    expected_s[1] = 20
+    expected_s[2] = -10
+    expected_s[3] = 40
+    expected_s[4] = 6
+    expected_s[5] = 30
+    assert_array_eq(s, expected_s, "scale(arr, 2)")
+
+    var ab = abs_array(arr)
+    var expected_ab = array(6)
+    expected_ab[0] = 5
+    expected_ab[1] = 10
+    expected_ab[2] = 5
+    expected_ab[3] = 20
+    expected_ab[4] = 3
+    expected_ab[5] = 15
+    assert_array_eq(ab, expected_ab, "abs_array(arr)")
+
+    var cl = clamp_array(arr, 0, 12)
+    var expected_cl = array(6)
+    expected_cl[0] = 5
+    expected_cl[1] = 10
+    expected_cl[2] = 0
+    expected_cl[3] = 12
+    expected_cl[4] = 3
+    expected_cl[5] = 12
+    assert_array_eq(cl, expected_cl, "clamp_array(arr, 0, 12)")
+
+    // 9. Teste print_array visual
+    print("Visualizacao de arrays:")
+    print_array(z)
+    print_array(o)
+    print_array(f)
+    print_array(r1)
+    print_array(arr)
+
+    print("Todos os testes passaram com sucesso!")
+}

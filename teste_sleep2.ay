@@ -1,0 +1,7 @@
+fn main() {
+    var segundos = 1
+    print("esperando...")
+    sleep(segundos)
+    print("acabou")
+    return 0
+}

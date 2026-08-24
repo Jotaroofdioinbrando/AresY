@@ -1,0 +1,18 @@
+fn main() {
+    var limite = 100000000
+    var inicio = time()
+    var acc = 123456789
+    var i = 0
+
+    while i < limite {
+        acc = (acc ^ (i * 3)) & 2147483647
+        i = i + 1
+    }
+
+    var fim = time()
+    print("Resultado Bitwise:")
+    print(acc)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

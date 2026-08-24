@@ -1,0 +1,41 @@
+fn main() {
+    var tamanho = 1000
+    var matriz = array(tamanho)
+    
+    // Inicializa a Matriz 2D
+    var i = 0
+    while i < tamanho {
+        matriz[i] = array(tamanho)
+        var j = 0
+        while j < tamanho {
+            matriz[i][j] = i + j
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var inicio = time()
+    var soma = 0
+    var k = 0
+
+    // 10 passagens completas pela matriz 2D
+    while k < 10 {
+        var r = 0
+        while r < tamanho {
+            var c = 0
+            while c < tamanho {
+                soma = soma + matriz[r][c]
+                c = c + 1
+            }
+            r = r + 1
+        }
+        k = k + 1
+    }
+
+    var fim = time()
+    print("Soma da Matriz:")
+    print(soma)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

@@ -1,0 +1,16 @@
+fn main() {
+    var x = 10
+
+    if x > 5 {
+        print("maior")
+    } else {
+        print("menor")
+    }
+
+    var i = 0
+
+    while i < 5 {
+        print(i)
+        i = i + 1
+    }
+}

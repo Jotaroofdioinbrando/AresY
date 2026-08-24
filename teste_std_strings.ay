@@ -1,0 +1,19 @@
+import "stdlib/strings.ay"
+
+fn main() {
+    print(eh_vazia(""))
+    print(eh_vazia("AresY"))
+
+    print(repetir("ay", 3))
+
+    print(inverter("AresY"))
+
+    print(eh_palindromo("radar"))
+    print(eh_palindromo("AresY"))
+
+    print(contem("AresY e rapido", "rapido"))
+    print(contem("AresY e rapido", "python"))
+    print(contem("abc", ""))
+
+    return 0
+}

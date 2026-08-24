@@ -1,0 +1,43 @@
+fn trabalho(n: i64) -> i64 {
+    var a = 0
+    var b = 1
+    var i = 0
+    var soma = 0
+
+    while i < n {
+        var proximo = a + b
+        a = b
+        b = proximo
+
+        if b > 1000000000 {
+            a = a % 1000000007
+            b = b % 1000000007
+        }
+
+        soma = (soma + a * 31 + b * 17) % 1000000007
+        i = i + 1
+    }
+
+    return soma
+}
+
+fn main() {
+    var inicio = time()
+
+    var resultado = 0
+    var i = 0
+
+    while i < 1000000 {
+        resultado = trabalho(100)
+        i = i + 1
+    }
+
+    var fim = time()
+
+    print("Resultado:")
+    print(resultado)
+    print("Tempo:")
+    print(fim - inicio)
+
+    return 0
+}

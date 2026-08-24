@@ -1,0 +1,6 @@
+fn main() {
+    print("antes")
+    sleep(2)
+    print("depois")
+    return 0
+}

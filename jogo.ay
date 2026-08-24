@@ -1,0 +1,20 @@
+fn main() {
+var numero_secreto = random(10)
+print("=== JOGO DA ADIVINHACAO ===")
+print("Tente acertar o numero de 0 a 9!")
+var acertou = false
+while acertou == false {
+print("Digite seu palpite:")
+var palpite = input()
+if palpite == numero_secreto {
+print("Parabens! Voce acertou!")
+acertou = true
+} else {
+if palpite > numero_secreto {
+print("Muito alto! Tente de novo.")
+} else {
+print("Muito baixo! Tente de novo.")
+}
+}
+}
+}

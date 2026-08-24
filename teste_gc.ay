@@ -1,22 +1,44 @@
-fn main() {
-    print("=== TESTE DE ESTRESSE DO GARBAGE COLLECTOR ===")
-    
+fn criar_dados(n: i64) -> i64 {
+    var total = 0
     var i = 0
-    var limite = 10000000
-    var inicio = time()
 
-    while i < limite {
-        // Aloca array e string temporários que precisam ser coletados pelo GC
-        var temp_arr = array(100)
-        var temp_str = "AresY_GC_Test_" + str(i)
-        
+    while i < n {
+        var texto = "AresY objeto temporario"
+        var copia = texto + " #" + str(i)
+
+        var arr = array(20)
+        arr[0] = i
+        arr[1] = i * 2
+        arr[2] = i * 3
+
+        total = total + arr[0] + arr[1] + arr[2] + len(copia)
+
         i = i + 1
     }
 
+    return total
+}
+
+fn main() {
+    print("=== TESTE GC ===")
+
+    var inicio = time()
+
+    var resultado = 0
+    var rodada = 0
+
+    while rodada < 100 {
+        resultado = criar_dados(10000)
+        rodada = rodada + 1
+    }
+
     var fim = time()
-    print("10 Milhões de alocações temporárias concluídas sem estourar a RAM!")
-    print("Tempo total:")
+
+    print("Resultado:")
+    print(resultado)
+
+    print("Tempo:")
     print(fim - inicio)
-    
+
     return 0
 }

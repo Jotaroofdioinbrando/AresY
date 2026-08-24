@@ -1,0 +1,272 @@
+// stdlib/numares.ay — Biblioteca de manipulação de arrays numéricos para AresY.
+//
+// Convenção:
+// Os arrays criados por esta biblioteca guardam o seu tamanho no índice 0 (arr[0]).
+// Os elementos reais do array estão nos índices de 1 a N.
+// Isso permite que as funções saibam o tamanho do array sem que o usuário precise passá-lo explicitamente.
+//
+// Como importar:
+//   import "stdlib/numares.ay"
+
+fn zeros(n: i64) -> i64 {
+    var arr = array(n + 1)
+    arr[0] = n
+    var i = 1
+    while i <= n {
+        arr[i] = 0
+        i = i + 1
+    }
+    return arr
+}
+
+fn ones(n: i64) -> i64 {
+    var arr = array(n + 1)
+    arr[0] = n
+    var i = 1
+    while i <= n {
+        arr[i] = 1
+        i = i + 1
+    }
+    return arr
+}
+
+fn full(n: i64, val: i64) -> i64 {
+    var arr = array(n + 1)
+    arr[0] = n
+    var i = 1
+    while i <= n {
+        arr[i] = val
+        i = i + 1
+    }
+    return arr
+}
+
+fn arange(start: i64, stop: i64, step: i64) -> i64 {
+    if step == 0 {
+        throw "arange: step nao pode ser zero"
+    }
+    var n = 0
+    if step > 0 {
+        if stop > start {
+            n = (stop - start + step - 1) / step
+        }
+    } else {
+        if start > stop {
+            n = (start - stop - step - 1) / (-step)
+        }
+    }
+    var arr = array(n + 1)
+    arr[0] = n
+    var i = 1
+    var val = start
+    while i <= n {
+        arr[i] = val
+        val = val + step
+        i = i + 1
+    }
+    return arr
+}
+
+fn size(arr: i64) -> i64 {
+    return arr[0]
+}
+
+fn sum(arr: i64) -> i64 {
+    var n = arr[0]
+    var s = 0
+    var i = 1
+    while i <= n {
+        s = s + arr[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn amin(arr: i64) -> i64 {
+    var n = arr[0]
+    if n == 0 {
+        throw "amin: array vazio"
+    }
+    var m = arr[1]
+    var i = 2
+    while i <= n {
+        if arr[i] < m {
+            m = arr[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn amax(arr: i64) -> i64 {
+    var n = arr[0]
+    if n == 0 {
+        throw "amax: array vazio"
+    }
+    var m = arr[1]
+    var i = 2
+    while i <= n {
+        if arr[i] > m {
+            m = arr[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn add(arr1: i64, arr2: i64) -> i64 {
+    var n1 = arr1[0]
+    var n2 = arr2[0]
+    if n1 != n2 {
+        throw "add: arrays com tamanhos diferentes"
+    }
+    var res = array(n1 + 1)
+    res[0] = n1
+    var i = 1
+    while i <= n1 {
+        res[i] = arr1[i] + arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn sub(arr1: i64, arr2: i64) -> i64 {
+    var n1 = arr1[0]
+    var n2 = arr2[0]
+    if n1 != n2 {
+        throw "sub: arrays com tamanhos diferentes"
+    }
+    var res = array(n1 + 1)
+    res[0] = n1
+    var i = 1
+    while i <= n1 {
+        res[i] = arr1[i] - arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn mul(arr1: i64, arr2: i64) -> i64 {
+    var n1 = arr1[0]
+    var n2 = arr2[0]
+    if n1 != n2 {
+        throw "mul: arrays com tamanhos diferentes"
+    }
+    var res = array(n1 + 1)
+    res[0] = n1
+    var i = 1
+    while i <= n1 {
+        res[i] = arr1[i] * arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn div(arr1: i64, arr2: i64) -> i64 {
+    var n1 = arr1[0]
+    var n2 = arr2[0]
+    if n1 != n2 {
+        throw "div: arrays com tamanhos diferentes"
+    }
+    var res = array(n1 + 1)
+    res[0] = n1
+    var i = 1
+    while i <= n1 {
+        if arr2[i] == 0 {
+            throw "div: divisao por zero no elemento"
+        }
+        res[i] = arr1[i] / arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn dot(arr1: i64, arr2: i64) -> i64 {
+    var n1 = arr1[0]
+    var n2 = arr2[0]
+    if n1 != n2 {
+        throw "dot: arrays com tamanhos diferentes"
+    }
+    var s = 0
+    var i = 1
+    while i <= n1 {
+        s = s + (arr1[i] * arr2[i])
+        i = i + 1
+    }
+    return s
+}
+
+fn copy(arr: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    while i <= n {
+        res[i] = arr[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn scale(arr: i64, factor: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    while i <= n {
+        res[i] = arr[i] * factor
+        i = i + 1
+    }
+    return res
+}
+
+fn abs_array(arr: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    while i <= n {
+        var val = arr[i]
+        if val < 0 {
+            val = -val
+        }
+        res[i] = val
+        i = i + 1
+    }
+    return res
+}
+
+fn clamp_array(arr: i64, min_val: i64, max_val: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    while i <= n {
+        var val = arr[i]
+        if val < min_val {
+            val = min_val
+        } else {
+            if val > max_val {
+                val = max_val
+            }
+        }
+        res[i] = val
+        i = i + 1
+    }
+    return res
+}
+
+fn print_array(arr: i64) {
+    var n = arr[0]
+    var i = 1
+    var s = "["
+    while i <= n {
+        s = s + str(arr[i])
+        if i < n {
+            s = s + ", "
+        }
+        i = i + 1
+    }
+    s = s + "]"
+    print(s)
+}

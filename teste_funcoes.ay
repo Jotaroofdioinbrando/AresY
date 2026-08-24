@@ -1,0 +1,17 @@
+fn soma(a, b) {
+    return a + b
+}
+
+fn media(a: double, b: double) -> double {
+    return (a + b) / 2.0
+}
+
+fn saudacao(nome: str) -> str {
+    return "Olá, " + nome
+}
+
+fn main() {
+    print(soma(10, 20))
+    print(media(10.0, 20.0))
+    print(saudacao("AresY"))
+}

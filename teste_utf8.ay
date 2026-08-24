@@ -1,0 +1,3 @@
+fn main() {
+    print("Olá, mundo! Açaí, coração, ção, é, ã, ç")
+}

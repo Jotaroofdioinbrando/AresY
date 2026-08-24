@@ -1,0 +1,11 @@
+fn main() {
+    var nome = "AresY"
+    var mensagem = "Olá, " + nome
+
+    print(mensagem)
+    print(len(nome))
+    print(upper(nome))
+    print(lower(nome))
+    print(substr(nome, 0, 3))
+    print(char_at(nome, 0))
+}

@@ -1,0 +1,32 @@
+fn main() {
+    var limite = 500000
+    var inicio = time()
+    var total_primos = 0
+    var n = 2
+    var i = 2
+    var eh_primo = 1
+
+    while n <= limite {
+        eh_primo = 1
+        i = 2
+        while i * i <= n {
+            if n % i == 0 {
+                eh_primo = 0
+                i = n // força saída do loop
+            } else {
+                i = i + 1
+            }
+        }
+        if eh_primo == 1 {
+            total_primos = total_primos + 1
+        }
+        n = n + 1
+    }
+
+    var fim = time()
+    print("Total de primos:")
+    print(total_primos)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

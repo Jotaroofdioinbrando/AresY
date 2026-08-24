@@ -1,0 +1,18 @@
+fn main() {
+    var limite = 10000000
+    var inicio = time()
+    var soma = 0.0
+    var i = 1.0
+
+    while i < limite {
+        soma = soma + sin(i) + cos(i) + pow(1.01, 2.0)
+        i = i + 1.0
+    }
+
+    var fim = time()
+    print("Soma Math Builtin:")
+    print(soma)
+    print("Tempo AresY v8:")
+    print(fim - inicio)
+    return 0
+}

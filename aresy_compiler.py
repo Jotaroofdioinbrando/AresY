@@ -241,7 +241,8 @@ class Num:
 class Str:
     def __init__(self, value):
         raw = value[1:-1]
-        self.value = bytes(raw, "utf-8").decode("unicode_escape")
+        import codecs
+        self.value = codecs.escape_decode(bytes(raw, "utf-8"))[0].decode("utf-8")
 class Bool:
     def __init__(self, value): self.value = value
 class Var:
@@ -269,11 +270,11 @@ class While:
 class FuncDef:
     def __init__(self, name, params, body, param_types=None, ret_type=None):
         self.name, self.params, self.body = name, params, body
-        # tipagem unificada: cada parâmetro tem um tipo real (i64/double/str),
-        # não mais travado em i64. Sem anotação -> i64 (compatível com código
-        # antigo). ret_type é None quando não anotado (mantém a inferência
-        # antiga por varredura do corpo, via _scan_return_type).
-        self.param_types = param_types if param_types is not None else ["i64"] * len(params)
+        # tipagem unificada: cada parâmetro tem um tipo real (i64/double/str).
+        # None = sem anotação — resolvido em compile_program via inferência
+        # leve de uso (ver _infer_param_type); se não achar evidência, cai
+        # em i64 (compatível com código antigo).
+        self.param_types = param_types if param_types is not None else [None] * len(params)
         self.ret_type = ret_type
 class Return:
     def __init__(self, expr): self.expr = expr
@@ -415,7 +416,7 @@ class Parser:
         param_types = []
         while self.peek().value != ")":
             pname = self.expect("ID").value
-            ptype = "i64"
+            ptype = None  # None = sem anotação (decidido depois: inferência leve ou i64)
             if self.peek().value == ":":
                 self.advance()
                 traw = self.expect("ID").value
@@ -686,6 +687,8 @@ class CodeGen:
                     walk(s.then_b); walk(s.else_b)
                 elif isinstance(s, While):
                     walk(s.body)
+                elif isinstance(s, TryCatch):
+                    walk(s.try_body); walk(s.catch_body)
         walk(body)
         return found["type"]
 
@@ -696,8 +699,72 @@ class CodeGen:
         if isinstance(node, Num): return "double" if node.is_float else "i64"
         if isinstance(node, Str): return "str"
         if isinstance(node, Call) and node.name in ("sqrt", "time"): return "double"
+        if isinstance(node, Call) and node.name in ("upper", "lower", "substr", "char_at", "str",
+                                                      "read_line", "read_file"):
+            return "str"
         if isinstance(node, BinOp): return self._guess_type(node.left)
         return "i64"
+
+    _STR_BUILTIN_FIRST_ARG = {"upper", "lower", "len", "substr", "char_at"}
+
+    def _infer_param_type(self, param_name, body):
+        """Parâmetro sem anotação ('fn f(s) {...}'): tenta adivinhar 'str'
+        olhando como ele é usado no corpo (passado pra uma função de string,
+        ou comparado/concatenado com uma string literal). Sem nenhuma
+        evidência, cai no padrão de sempre: i64."""
+        found = {"str": False}
+
+        def walk_expr(e):
+            if e is None or found["str"]:
+                return
+            if isinstance(e, Call):
+                if (e.name in self._STR_BUILTIN_FIRST_ARG and e.args
+                        and isinstance(e.args[0], Var) and e.args[0].name == param_name):
+                    found["str"] = True
+                for a in e.args:
+                    walk_expr(a)
+            elif isinstance(e, BinOp):
+                l_is_p = isinstance(e.left, Var) and e.left.name == param_name
+                r_is_p = isinstance(e.right, Var) and e.right.name == param_name
+                if l_is_p and isinstance(e.right, Str): found["str"] = True
+                if r_is_p and isinstance(e.left, Str): found["str"] = True
+                walk_expr(e.left); walk_expr(e.right)
+            elif isinstance(e, UnaryOp):
+                walk_expr(e.operand)
+            elif isinstance(e, IndexGet):
+                walk_expr(e.arr); walk_expr(e.idx)
+
+        def walk_stmt(s):
+            if found["str"]:
+                return
+            if isinstance(s, (VarDecl, Assign)):
+                walk_expr(s.expr)
+            elif isinstance(s, IndexSet):
+                walk_expr(s.arr); walk_expr(s.idx); walk_expr(s.expr)
+            elif isinstance(s, Print):
+                walk_expr(s.expr)
+            elif isinstance(s, If):
+                walk_expr(s.cond)
+                for x in s.then_b: walk_stmt(x)
+                for x in s.else_b: walk_stmt(x)
+            elif isinstance(s, While):
+                walk_expr(s.cond)
+                for x in s.body: walk_stmt(x)
+            elif isinstance(s, TryCatch):
+                for x in s.try_body: walk_stmt(x)
+                for x in s.catch_body: walk_stmt(x)
+            elif isinstance(s, Throw):
+                walk_expr(s.expr)
+            elif isinstance(s, Return):
+                if s.expr is not None: walk_expr(s.expr)
+            elif isinstance(s, ExprStmt):
+                walk_expr(s.expr)
+
+        for s in body:
+            walk_stmt(s)
+            if found["str"]:
+                break
+        return "str" if found["str"] else "i64"
 
     EXTERN_TYPE_MAP = {"i64": "i64", "f64": "double", "void": "void"}
 
@@ -723,6 +790,14 @@ class CodeGen:
         for f in funcdefs:
             if f.name in self.functions:
                 raise CompileError(f"'{f.name}' já foi declarada (conflito com extern)")
+            # resolve parâmetros sem anotação (None) por inferência leve de
+            # uso — sem isso, toda função que recebe string sem anotar
+            # explicitamente ("fn f(s) { return upper(s) }") quebrava com
+            # erro de tipo, mesmo sendo óbvio pelo uso que 's' é string.
+            f.param_types = [
+                t if t is not None else self._infer_param_type(p, f.body)
+                for p, t in zip(f.params, f.param_types)
+            ]
             # "params" agora guarda os TIPOS reais de cada parâmetro (unificado
             # com extern, que já funcionava assim). "ret" usa a anotação
             # explícita ('-> tipo') se houver; senão cai na heurística antiga
@@ -1122,7 +1197,26 @@ class CodeGen:
                 instr = {"+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv"}.get(node.op)
                 if instr is None:
                     raise CompileError("'%' (módulo) não é suportado com float")
-                lines.append(f"  %tmp_{uid} = {instr} double {v1}, {v2}")
+                if node.op == "/":
+                    err_uid = self.new_id()
+                    err_text = "divisao por zero"
+                    err_escaped = llvm_escape_string(err_text)
+                    err_byte_len = len(err_text.encode("utf-8")) + 1
+                    self.strings.append(
+                        f'@.str.{err_uid} = private unnamed_addr constant [{err_byte_len} x i8] c"{err_escaped}\\00"'
+                    )
+                    lines.append(f"  %cond_div_zero_{uid} = fcmp oeq double {v2}, 0.0")
+                    lines.append(f"  br i1 %cond_div_zero_{uid}, label %div_zero_err_{uid}, label %div_ok_{uid}")
+                    lines.append(f"div_zero_err_{uid}:")
+                    lines.append(f"  %err_sp_{uid} = getelementptr [{err_byte_len} x i8], [{err_byte_len} x i8]* @.str.{err_uid}, i32 0, i32 0")
+                    lines.append(f"  store i8* %err_sp_{uid}, i8** @__ares_exc_msg")
+                    lines.append("  store i32 1, i32* @__ares_exc_flag")
+                    target = self.catch_stack[-1] if self.catch_stack else self.func_exc_exit
+                    lines.append(f"  br label %{target}")
+                    lines.append(f"div_ok_{uid}:")
+                    lines.append(f"  %tmp_{uid} = fdiv double {v1}, {v2}")
+                else:
+                    lines.append(f"  %tmp_{uid} = {instr} double {v1}, {v2}")
                 return "double", f"%tmp_{uid}"
             else:
                 # normaliza operandos "estranhos" (ex.: i1 vindo direto de uma
@@ -1132,7 +1226,26 @@ class CodeGen:
                 v1i = self.cast(lines, t1, v1, "i64")
                 v2i = self.cast(lines, t2, v2, "i64")
                 instr = {"+": "add nsw", "-": "sub nsw", "*": "mul nsw", "/": "sdiv", "%": "srem"}[node.op]
-                lines.append(f"  %tmp_{uid} = {instr} i64 {v1i}, {v2i}")
+                if node.op in ("/", "%"):
+                    err_uid = self.new_id()
+                    err_text = "divisao por zero"
+                    err_escaped = llvm_escape_string(err_text)
+                    err_byte_len = len(err_text.encode("utf-8")) + 1
+                    self.strings.append(
+                        f'@.str.{err_uid} = private unnamed_addr constant [{err_byte_len} x i8] c"{err_escaped}\\00"'
+                    )
+                    lines.append(f"  %cond_div_zero_{uid} = icmp eq i64 {v2i}, 0")
+                    lines.append(f"  br i1 %cond_div_zero_{uid}, label %div_zero_err_{uid}, label %div_ok_{uid}")
+                    lines.append(f"div_zero_err_{uid}:")
+                    lines.append(f"  %err_sp_{uid} = getelementptr [{err_byte_len} x i8], [{err_byte_len} x i8]* @.str.{err_uid}, i32 0, i32 0")
+                    lines.append(f"  store i8* %err_sp_{uid}, i8** @__ares_exc_msg")
+                    lines.append("  store i32 1, i32* @__ares_exc_flag")
+                    target = self.catch_stack[-1] if self.catch_stack else self.func_exc_exit
+                    lines.append(f"  br label %{target}")
+                    lines.append(f"div_ok_{uid}:")
+                    lines.append(f"  %tmp_{uid} = {instr} i64 {v1i}, {v2i}")
+                else:
+                    lines.append(f"  %tmp_{uid} = {instr} i64 {v1i}, {v2i}")
                 return "i64", f"%tmp_{uid}"
 
         if isinstance(node, IndexGet):
@@ -1675,6 +1788,10 @@ class ReplSession:
         new_stmts = []
         for s in stmts:
             if isinstance(s, FuncDef):
+                s.param_types = [
+                    t if t is not None else self.codegen._infer_param_type(p, s.body)
+                    for p, t in zip(s.params, s.param_types)
+                ]
                 ret_kind = s.ret_type if s.ret_type is not None else self.codegen._scan_return_type(s.body)
                 self.codegen.functions[s.name] = {
                     "params": s.param_types,

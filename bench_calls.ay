@@ -1,0 +1,22 @@
+fn calcula(a, b) {
+    return (a * 3) + (b / 2)
+}
+
+fn main() {
+    var limite = 50000000
+    var inicio = time()
+    var soma = 0
+    var i = 0
+
+    while i < limite {
+        soma = soma + calcula(i, 4)
+        i = i + 1
+    }
+
+    var fim = time()
+    print("Soma:")
+    print(soma)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

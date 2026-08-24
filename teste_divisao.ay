@@ -1,0 +1,15 @@
+fn main() {
+    try {
+        var a = 10 / 2
+        print(a)
+    } catch e {
+        print("Erro: " + e)
+    }
+
+    try {
+        var b = 10 / 0
+        print(b)
+    } catch erro {
+        print("Erro: " + erro)
+    }
+}

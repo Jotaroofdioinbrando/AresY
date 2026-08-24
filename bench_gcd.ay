@@ -1,0 +1,28 @@
+fn main() {
+    var limite = 50000000
+    var inicio = time()
+    var soma_mdc = 0
+    var i = 1
+
+    while i < limite {
+        var a = i * 7
+        var b = i * 3
+        
+        // Algoritmo de Euclides
+        while b != 0 {
+            var temp = b
+            b = a % b
+            a = temp
+        }
+        
+        soma_mdc = soma_mdc + a
+        i = i + 1
+    }
+
+    var fim = time()
+    print("Soma dos MDCs:")
+    print(soma_mdc)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

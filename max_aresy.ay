@@ -1,0 +1,56 @@
+fn trabalho(n: i64) -> i64 {
+    var total = 0
+    var i = 0
+
+    while i < n {
+        var arr = array(16)
+
+        arr[0] = i
+        arr[1] = i * 3
+        arr[2] = i * 7
+        arr[3] = i * 11
+        arr[4] = i * 13
+        arr[5] = i * 17
+        arr[6] = i * 19
+        arr[7] = i * 23
+
+        var x = arr[i % 8]
+
+        if x % 2 == 0 {
+            total = total + x * 3
+        } else {
+            total = total + x * 5
+        }
+
+        total = total % 1000000007
+
+        var texto = "AresY-" + str(i % 1000)
+        total = total + len(texto)
+
+        i = i + 1
+    }
+
+    return total
+}
+
+fn main() {
+    var inicio = time()
+
+    var resultado = 0
+    var rodada = 0
+
+    while rodada < 100 {
+        resultado = trabalho(100000)
+        rodada = rodada + 1
+    }
+
+    var fim = time()
+
+    print("=== ARESY MAX ===")
+    print("Resultado:")
+    print(resultado)
+    print("Tempo:")
+    print(fim - inicio)
+
+    return 0
+}
