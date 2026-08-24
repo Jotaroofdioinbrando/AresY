@@ -1,0 +1,18 @@
+fn fibo(n) {
+    if n <= 1 {
+        return n
+    }
+    return fibo(n - 1) + fibo(n - 2)
+}
+
+fn main() {
+    var inicio = time()
+    var res = fibo(38)
+    var fim = time()
+    
+    print("Resultado:")
+    print(res)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

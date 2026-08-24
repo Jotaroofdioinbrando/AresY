@@ -1,0 +1,32 @@
+fn e_impar(n) {
+    if n == 0 {
+        return 0
+    }
+    return e_par(n - 1)
+}
+
+fn e_par(n) {
+    if n == 0 {
+        return 1
+    }
+    return e_impar(n - 1)
+}
+
+fn main() {
+    var limite = 20000
+    var inicio = time()
+    var resultado = 0
+    var i = 0
+
+    while i < 1000 {
+        resultado = e_par(limite)
+        i = i + 1
+    }
+
+    var fim = time()
+    print("Resultado Par (1 = Sim):")
+    print(resultado)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

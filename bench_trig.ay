@@ -1,0 +1,19 @@
+fn main() {
+    var limite = 10000000
+    var inicio = time()
+    var soma = 0.0
+    var i = 0
+
+    while i < limite {
+        // Usa transformações matemáticas com ponto flutuante
+        soma = soma + sin(i) * cos(i)
+        i = i + 1
+    }
+
+    var fim = time()
+    print("Soma Trigonométrica:")
+    print(soma)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

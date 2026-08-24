@@ -1,0 +1,18 @@
+fn main() {
+    var inicio = time()
+    var soma = 0.0
+    var i = 1
+    var limite = 20000000
+
+    while i <= limite {
+        soma = soma + sqrt(i)
+        i = i + 1
+    }
+
+    var fim = time()
+    print("Soma:")
+    print(soma)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}

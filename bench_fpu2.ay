@@ -1,0 +1,21 @@
+fn main() {
+    var limite = 20000000
+    var inicio = time()
+    var soma = 0.0
+    var x = 0.5
+    var passo = 1.0 / 10000000.0
+    var i = 0
+
+    while i < limite {
+        soma = soma + (x * x * x * x) - (3.5 * x * x) + (2.1 * x) - 0.7
+        x = x + passo
+        i = i + 1
+    }
+
+    var fim = time()
+    print("Soma FPU:")
+    print(soma)
+    print("Tempo AresY:")
+    print(fim - inicio)
+    return 0
+}
