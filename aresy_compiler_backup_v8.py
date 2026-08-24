@@ -48,31 +48,12 @@ TOKEN_SPEC = [
     ("STRING",   r'"[^"]*"'),
     ("ID",       r"[A-Za-z_][A-Za-z0-9_]*"),
     ("COMMENT",  r"//.*"),
-    ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~:]"),
+    ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~]"),
     ("NEWLINE",  r"\n"),
     ("SKIP",     r"[ \t]+"),
 ]
 MASTER_RE = re.compile("|".join(f"(?P<{n}>{p})" for n, p in TOKEN_SPEC))
 KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false", "extern", "import"}
-
-# Nomes de tipo aceitos em anotações (fn e extern). Mapeiam pro vocabulário
-# interno do compilador: "i64", "double", "str", "void".
-TYPE_ALIASES = {
-    "i64": "i64",
-    "f64": "double",
-    "double": "double",
-    "str": "str",
-    "string": "str",
-    "void": "void",
-}
-
-
-def resolve_type_name(raw):
-    if raw not in TYPE_ALIASES:
-        raise SyntaxError(
-            f"Tipo '{raw}' desconhecido — use i64, double (ou f64), str (ou string) ou void"
-        )
-    return TYPE_ALIASES[raw]
 
 
 class Token:
@@ -138,14 +119,7 @@ class If:
 class While:
     def __init__(self, cond, body): self.cond, self.body = cond, body
 class FuncDef:
-    def __init__(self, name, params, body, param_types=None, ret_type=None):
-        self.name, self.params, self.body = name, params, body
-        # tipagem unificada: cada parâmetro tem um tipo real (i64/double/str),
-        # não mais travado em i64. Sem anotação -> i64 (compatível com código
-        # antigo). ret_type é None quando não anotado (mantém a inferência
-        # antiga por varredura do corpo, via _scan_return_type).
-        self.param_types = param_types if param_types is not None else ["i64"] * len(params)
-        self.ret_type = ret_type
+    def __init__(self, name, params, body): self.name, self.params, self.body = name, params, body
 class Return:
     def __init__(self, expr): self.expr = expr
 class ExprStmt:
@@ -263,27 +237,14 @@ class Parser:
     def parse_funcdef(self):
         self.advance()
         name = self.expect("ID").value
-        self.expect("OP")  # (
+        self.expect("OP")
         params = []
-        param_types = []
         while self.peek().value != ")":
-            pname = self.expect("ID").value
-            ptype = "i64"
-            if self.peek().value == ":":
-                self.advance()
-                traw = self.expect("ID").value
-                ptype = resolve_type_name(traw)
-            params.append(pname)
-            param_types.append(ptype)
+            params.append(self.expect("ID").value)
             if self.peek().value == ",": self.advance()
-        self.expect("OP")  # )
-        ret_type = None
-        if self.peek().value == "->":
-            self.advance()
-            traw = self.expect("ID").value
-            ret_type = resolve_type_name(traw)
+        self.expect("OP")
         body = self.parse_block()
-        return FuncDef(name, params, body, param_types=param_types, ret_type=ret_type)
+        return FuncDef(name, params, body)
 
     def parse_if(self):
         self.advance()
@@ -389,12 +350,6 @@ BUILTIN_DECLARES = (
     'declare i64 @strlen(i8*)\n'
     'declare i8* @strcpy(i8*, i8*)\n'
     'declare i8* @strcat(i8*, i8*)\n'
-    # --- GC (Boehm-Demers-Weiser, libgc, linkada via -lgc no clang) ---
-    # Conservador (varre stack/registradores procurando ponteiros), mas
-    # bem mais rápido que qualquer coletor "correto" de rastreamento
-    # preciso escrito à mão — é o mesmo motor que Guile/Chicken usam.
-    'declare void @GC_init()\n'
-    'declare i8* @GC_malloc(i64)\n'
     # --- Math (libm, já linkada via -lm no clang) ---
     'declare double @sin(double)\n'
     'declare double @cos(double)\n'
@@ -431,9 +386,8 @@ def fmt_double_literal(v):
 
 
 class CodeGen:
-    def __init__(self, target_triple=None, use_gc=True):
+    def __init__(self, target_triple=None):
         self.target_triple = target_triple
-        self.use_gc = use_gc
         self.counter = 0
         self.strings = []
         self.functions = {}   # name -> {'params': [...], 'ret': 'i64'|'double'|'void', 'extern': bool}
@@ -463,11 +417,9 @@ class CodeGen:
         return found["type"]
 
     def _guess_type(self, node):
-        # heurística leve só pra declarar o cabeçalho da função no LLVM
-        # quando NÃO há anotação explícita de retorno ('-> tipo'); o valor
-        # real de retorno é convertido (cast) se necessário no codegen.
+        # heurística leve só pra declarar o cabeçalho da função no LLVM;
+        # o valor real de retorno é convertido (cast) se necessário no codegen.
         if isinstance(node, Num): return "double" if node.is_float else "i64"
-        if isinstance(node, Str): return "str"
         if isinstance(node, Call) and node.name in ("sqrt", "time"): return "double"
         if isinstance(node, BinOp): return self._guess_type(node.left)
         return "i64"
@@ -496,13 +448,8 @@ class CodeGen:
         for f in funcdefs:
             if f.name in self.functions:
                 raise CompileError(f"'{f.name}' já foi declarada (conflito com extern)")
-            # "params" agora guarda os TIPOS reais de cada parâmetro (unificado
-            # com extern, que já funcionava assim). "ret" usa a anotação
-            # explícita ('-> tipo') se houver; senão cai na heurística antiga
-            # (varre os returns do corpo tentando adivinhar).
-            ret_kind = f.ret_type if f.ret_type is not None else self._scan_return_type(f.body)
             self.functions[f.name] = {
-                "params": f.param_types, "ret": ret_kind, "extern": False,
+                "params": f.params, "ret": self._scan_return_type(f.body), "extern": False,
             }
 
         body_ir = []
@@ -520,18 +467,13 @@ class CodeGen:
         lines = []
         is_main = node.name == "main"
         ret_kind = self.functions[node.name]["ret"]
-        llvm_ret = "i32" if is_main else self.llvm_type(ret_kind)
+        llvm_ret = "i32" if is_main else {"void": "void", "i64": "i64", "double": "double"}[ret_kind]
 
-        param_types = self.functions[node.name]["params"]
-        params_sig = ", ".join(
-            f"{self.llvm_type(t)} %arg_{i}" for i, t in enumerate(param_types)
-        )
+        params_sig = ", ".join(f"i64 %arg_{i}" for i in range(len(node.params)))
         lines.append(f"define {llvm_ret} @{node.name}({params_sig}) {{")
         lines.append("entry:")
 
         if is_main:
-            if self.use_gc:
-                lines.append("  call void @GC_init()")
             uid = self.new_id()
             lines.append(f"  %st_tv_{uid} = alloca [16 x i8], align 8")
             lines.append(f"  %st_tp_{uid} = getelementptr [16 x i8], [16 x i8]* %st_tv_{uid}, i32 0, i32 0")
@@ -542,11 +484,10 @@ class CodeGen:
             lines.append(f"  %seed_{uid} = trunc i64 %st_uv_{uid} to i32")
             lines.append(f"  call void @srand(i32 %seed_{uid})")
 
-        for i, (p, t) in enumerate(zip(node.params, param_types)):
-            env[p] = t
-            lt = self.llvm_type(t)
-            lines.append(f"  %{p} = alloca {lt}, align 8")
-            lines.append(f"  store {lt} %arg_{i}, {lt}* %{p}, align 8")
+        for i, p in enumerate(node.params):
+            env[p] = "i64"
+            lines.append(f"  %{p} = alloca i64, align 8")
+            lines.append(f"  store i64 %arg_{i}, i64* %{p}, align 8")
 
         for s in node.body:
             self.gen_stmt(s, env, lines, llvm_ret)
@@ -558,8 +499,6 @@ class CodeGen:
             lines.append("  ret i32 0")
         elif llvm_ret == "double":
             lines.append("  ret double 0.0")
-        elif llvm_ret == "i8*":
-            lines.append("  ret i8* null")
         else:
             lines.append("  ret i64 0")
         lines.append("}")
@@ -665,27 +604,12 @@ class CodeGen:
 
         elif isinstance(node, Return):
             if node.expr is None:
-                if func_ret_type == "void":
-                    lines.append("  ret void")
-                elif func_ret_type == "i8*":
-                    lines.append("  ret i8* null")
-                else:
-                    lines.append(f"  ret {func_ret_type} 0")
+                lines.append("  ret void" if func_ret_type == "void" else f"  ret {func_ret_type} 0")
             else:
                 t, v = self.gen_expr(node.expr, env, lines)
-                if func_ret_type == "i8*":
-                    if t != "str":
-                        raise CompileError(
-                            "Função declarada retornando 'str' (ou inferida assim), "
-                            f"mas o valor retornado é do tipo '{t}'"
-                        )
-                elif t == "str":
-                    raise CompileError(
-                        "Não é possível retornar uma string de uma função que não "
-                        "declara retorno 'str' — anota a função com '-> str'"
-                    )
-                else:
-                    v = self.cast(lines, t, v, func_ret_type)
+                if t == "str":
+                    raise CompileError("Retornar uma string de uma função ainda não é suportado")
+                v = self.cast(lines, t, v, func_ret_type)
                 lines.append(f"  ret {func_ret_type} {v}")
             uid = self.new_id()
             lines.append(f"unreachable_{uid}:")  # bloco morto p/ manter blocos válidos após ret
@@ -760,8 +684,7 @@ class CodeGen:
                 lines.append(f"  %l2_{uid} = call i64 @strlen(i8* {v2})")
                 lines.append(f"  %lt_{uid} = add nsw i64 %l1_{uid}, %l2_{uid}")
                 lines.append(f"  %la_{uid} = add nsw i64 %lt_{uid}, 1")
-                alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
-                lines.append(f"  %buf_{uid} = call i8* {alloc_fn}(i64 %la_{uid})")
+                lines.append(f"  %buf_{uid} = call i8* @malloc(i64 %la_{uid})")
                 lines.append(f"  call i8* @strcpy(i8* %buf_{uid}, i8* {v1})")
                 lines.append(f"  call i8* @strcat(i8* %buf_{uid}, i8* {v2})")
                 return "str", f"%buf_{uid}"
@@ -840,8 +763,7 @@ class CodeGen:
             t, sv = self.gen_expr(node.args[0], env, lines)
             sv = self.cast(lines, t, sv, "i64")
             lines.append(f"  %bt_{uid} = mul nsw i64 {sv}, 8")
-            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
-            lines.append(f"  %mr_{uid} = call i8* {alloc_fn}(i64 %bt_{uid})")
+            lines.append(f"  %mr_{uid} = call i8* @malloc(i64 %bt_{uid})")
             lines.append(f"  %mi_{uid} = ptrtoint i8* %mr_{uid} to i64")
             return "i64", f"%mi_{uid}"
 
@@ -939,25 +861,20 @@ class CodeGen:
         sig = self.functions[name]
         if len(sig["params"]) != len(node.args):
             raise CompileError(f"'{name}' espera {len(sig['params'])} argumento(s), recebeu {len(node.args)}")
+        is_extern = sig.get("extern", False)
         arg_strs = []
         for i, a in enumerate(node.args):
             t, v = self.gen_expr(a, env, lines)
-            param_t = sig["params"][i]
-            if param_t == "str" or t == "str":
-                if t != param_t:
-                    raise CompileError(
-                        f"'{name}': argumento {i + 1} esperado do tipo '{param_t}', recebeu '{t}'"
-                    )
-                arg_strs.append(f"i8* {v}")
-                continue
+            if t == "str":
+                raise CompileError(f"'{name}': argumentos do tipo string ainda não são aceitos em chamadas de função")
+            param_t = sig["params"][i] if is_extern else "i64"
             v = self.cast(lines, t, v, param_t)
             arg_strs.append(f"{param_t} {v}")
         ret_t = sig["ret"]
         if ret_t == "void":
             lines.append(f"  call void @{name}({', '.join(arg_strs)})")
             return "i64", "0"
-        ret_llvm = self.llvm_type(ret_t)
-        lines.append(f"  %call_{uid} = call {ret_llvm} @{name}({', '.join(arg_strs)})")
+        lines.append(f"  %call_{uid} = call {ret_t} @{name}({', '.join(arg_strs)})")
         return ret_t, f"%call_{uid}"
 
 
@@ -990,31 +907,21 @@ class NativeError(Exception):
     pass
 
 
-def compile_ir_to_binary(clang_path, ir_source, out_path, target_triple=None,
-                          opt_level="-O2", extra_libs=None, use_gc=True):
+def compile_ir_to_binary(clang_path, ir_source, out_path, target_triple=None, opt_level="-O2", extra_libs=None):
     with tempfile.TemporaryDirectory() as td:
         ll_path = os.path.join(td, "prog.ll")
         with open(ll_path, "w") as f:
             f.write(ir_source)
         cmd = [clang_path, opt_level, ll_path, "-lm"]
-        if use_gc:
-            cmd.append("-lgc")
         for lib in (extra_libs or []):
             cmd.append(f"-l{lib}")
         cmd += ["-o", out_path]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
-            msg = proc.stderr.strip() or "clang falhou ao compilar"
-            if use_gc and ("-lgc" in msg or "cannot find -lgc" in msg or "libgc" in msg):
-                msg += (
-                    "\n\nParece que a libgc (Boehm GC) não tá instalada. "
-                    "Instala com: pkg install libgc\n"
-                    "(ou roda com --no-gc pra compilar sem o coletor, usando malloc puro)"
-                )
-            raise NativeError(msg)
+            raise NativeError(proc.stderr.strip() or "clang falhou ao compilar")
 
 
-def run_file_native(path, target_triple=None, use_gc=True):
+def run_file_native(path, target_triple=None):
     clang_path = find_clang()
     if not clang_path:
         print("clang não encontrado. Instala com: pkg install clang")
@@ -1022,15 +929,14 @@ def run_file_native(path, target_triple=None, use_gc=True):
     with open(path) as f:
         src = f.read()
     try:
-        ir, imports = compile_source(src, target_triple=target_triple, use_gc=use_gc)
+        ir, imports = compile_source(src, target_triple=target_triple)
     except (CompileError, SyntaxError) as e:
         print(f"Erro de compilação: {e}")
         sys.exit(1)
     with tempfile.TemporaryDirectory() as td:
         bin_path = os.path.join(td, "programa")
         try:
-            compile_ir_to_binary(clang_path, ir, bin_path, target_triple,
-                                  extra_libs=imports, use_gc=use_gc)
+            compile_ir_to_binary(clang_path, ir, bin_path, target_triple, extra_libs=imports)
         except NativeError as e:
             print(f"Erro do clang:\n{e}")
             sys.exit(1)
@@ -1081,18 +987,16 @@ def _brace_balance(text):
 
 
 class ReplSession:
-    def __init__(self, clang_path, target_triple=None, use_gc=True):
+    def __init__(self, clang_path, target_triple=None):
         self.clang_path = clang_path
         self.target_triple = target_triple
-        self.use_gc = use_gc
-        self.codegen = CodeGen(target_triple=target_triple, use_gc=use_gc)
+        self.codegen = CodeGen(target_triple=target_triple)
         self.func_ir = {}       # nome -> IR já gerado da função
         self.extern_ir = []     # linhas "declare" de funções extern registradas
         self.var_types = {}     # nome -> "i64" | "double"
         self.var_values = {}    # nome -> valor atual conhecido
         self.array_vars = set()  # variáveis que guardam array (não persistem)
         self.str_vars = set()    # variáveis do tipo string (também não persistem)
-        self._gc_inited = False
 
     def _literal(self, t, v):
         return str(int(v)) if t == "i64" else str(float(v))
@@ -1105,10 +1009,9 @@ class ReplSession:
         new_stmts = []
         for s in stmts:
             if isinstance(s, FuncDef):
-                ret_kind = s.ret_type if s.ret_type is not None else self.codegen._scan_return_type(s.body)
                 self.codegen.functions[s.name] = {
-                    "params": s.param_types,
-                    "ret": ret_kind,
+                    "params": s.params,
+                    "ret": self.codegen._scan_return_type(s.body),
                     "extern": False,
                 }
                 self.func_ir[s.name] = self.codegen.gen_function(s)
@@ -1134,8 +1037,6 @@ class ReplSession:
 
         env = {}
         lines = []
-        if self.use_gc:
-            lines.append("  call void @GC_init()")
 
         # reinjeta variáveis de rounds anteriores como literais
         for name, t in self.var_types.items():
@@ -1197,7 +1098,7 @@ class ReplSession:
             # mais lenta que o binário do "aresy arquivo.ay" equivalente.
             compile_ir_to_binary(
                 self.clang_path, ir, bin_path, self.target_triple,
-                opt_level="-O2", extra_libs=self.codegen.imports, use_gc=self.use_gc,
+                opt_level="-O2", extra_libs=self.codegen.imports,
             )
             proc = subprocess.run([bin_path], capture_output=True, text=True)
 
@@ -1224,17 +1125,15 @@ class ReplSession:
         return before, proc.returncode
 
 
-def repl(target_triple=None, use_gc=True):
+def repl(target_triple=None):
     clang_path = find_clang()
     if not clang_path:
         print("clang não encontrado. Instala com: pkg install clang")
         sys.exit(1)
 
     print("aresY — modo interativo (compila e roda nativo via clang)")
-    if use_gc:
-        print("GC (Boehm) ligado — pra desligar, sai e roda: aresy --no-gc")
     print("Ctrl+D ou Ctrl+C pra sair.\n")
-    session = ReplSession(clang_path, target_triple=target_triple, use_gc=use_gc)
+    session = ReplSession(clang_path, target_triple=target_triple)
     buf = ""
     prompt = ">>> "
     while True:
@@ -1281,22 +1180,20 @@ def repl(target_triple=None, use_gc=True):
 # 7. DRIVER
 # ---------------------------------------------------------------------------
 
-def compile_source(source, target_triple=None, use_gc=True):
+def compile_source(source, target_triple=None):
     """Retorna (ir_llvm, lista_de_libs_importadas)."""
     tokens = tokenize(source)
     ast = Parser(tokens).parse_program()
-    codegen = CodeGen(target_triple=target_triple, use_gc=use_gc)
+    codegen = CodeGen(target_triple=target_triple)
     ir = codegen.compile_program(ast)
     return ir, codegen.imports
 
 
 def _build_native(argv):
-    # python aresy_compiler.py build programa.ay [saida.ll] [--triple TRIPLE] [--no-gc]
+    # python aresy_compiler.py build programa.ay [saida.ll] [--triple TRIPLE]
     if len(argv) < 1:
-        print("Uso: aresy build programa.ay [saida.ll] [--triple TRIPLE] [--no-gc]")
+        print("Uso: aresy build programa.ay [saida.ll] [--triple TRIPLE]")
         sys.exit(1)
-    use_gc = "--no-gc" not in argv
-    argv = [a for a in argv if a != "--no-gc"]
     with open(argv[0]) as f:
         src = f.read()
     triple = None
@@ -1304,17 +1201,14 @@ def _build_native(argv):
         triple = argv[argv.index("--triple") + 1]
     out_path = argv[1] if len(argv) > 1 and not argv[1].startswith("--") else "out.ll"
     try:
-        ir, imports = compile_source(src, target_triple=triple, use_gc=use_gc)
+        ir, imports = compile_source(src, target_triple=triple)
     except (CompileError, SyntaxError) as e:
         print(f"Erro de compilação: {e}")
         sys.exit(1)
     with open(out_path, "w") as f:
         f.write(ir)
     extra_libs = "".join(f" -l{lib}" for lib in imports)
-    gc_flag = " -lgc" if use_gc else ""
-    print(f"IR gerado em {out_path}. Compile com:\n  clang -O3 -ffast-math {out_path} -lm{gc_flag}{extra_libs} -o programa")
-    if use_gc:
-        print("(precisa da libgc instalada: pkg install libgc — ou use --no-gc pra compilar sem coletor)")
+    print(f"IR gerado em {out_path}. Compile com:\n  clang -O3 -ffast-math {out_path} -lm{extra_libs} -o programa")
 
 
 def _extract_triple(argv):
@@ -1324,9 +1218,7 @@ def _extract_triple(argv):
         i = rest.index("--triple")
         triple = rest[i + 1]
         del rest[i:i + 2]
-    use_gc = "--no-gc" not in rest
-    rest = [a for a in rest if a != "--no-gc"]
-    return triple, use_gc, rest
+    return triple, rest
 
 
 def _usage():
@@ -1335,32 +1227,29 @@ def _usage():
         "  aresy                         entra no modo interativo (REPL, nativo via clang)\n"
         "  aresy programa.ay             compila e roda direto (nativo, sem interpretar)\n"
         "  aresy run programa.ay         mesma coisa, explícito\n"
-        "  aresy build programa.ay [saida.ll] [--triple TRIPLE] [--no-gc]\n"
+        "  aresy build programa.ay [saida.ll] [--triple TRIPLE]\n"
         "                                 gera LLVM IR pra compilar com clang na mão\n"
         "  (adicione --triple TRIPLE em qualquer comando acima se precisar\n"
-        "   de um target diferente do padrão do seu aparelho)\n"
-        "  (adicione --no-gc em qualquer comando acima pra compilar sem o\n"
-        "   coletor de lixo — usa malloc puro, sem depender da libgc)"
+        "   de um target diferente do padrão do seu aparelho)"
     )
 
 
 if __name__ == "__main__":
-    triple, use_gc, args = _extract_triple(sys.argv[1:])
+    triple, args = _extract_triple(sys.argv[1:])
 
     if len(args) == 0:
-        repl(target_triple=triple, use_gc=use_gc)
+        repl(target_triple=triple)
     elif args[0] == "build":
-        extra = args[1:] + (["--triple", triple] if triple else []) + ([] if use_gc else ["--no-gc"])
-        _build_native(extra)
+        _build_native(args[1:] + (["--triple", triple] if triple else []))
     elif args[0] == "run":
         if len(args) < 2:
             _usage()
             sys.exit(1)
-        run_file_native(args[1], target_triple=triple, use_gc=use_gc)
+        run_file_native(args[1], target_triple=triple)
     elif args[0] in ("-h", "--help"):
         _usage()
     elif args[0].endswith(".ay"):
-        run_file_native(args[0], target_triple=triple, use_gc=use_gc)
+        run_file_native(args[0], target_triple=triple)
     else:
         _usage()
         sys.exit(1)
