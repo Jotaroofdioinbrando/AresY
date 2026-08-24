@@ -803,12 +803,13 @@ class ReplSession:
 
         with tempfile.TemporaryDirectory() as td:
             bin_path = os.path.join(td, "repl_bin")
-            # -O2, igual ao modo arquivo: o custo extra de compilar com
-            # otimização é irrelevante (poucos ms) comparado ao ganho em
-            # blocos com loop pesado (ex.: um "while" de centenas de
-            # milhões de iterações), onde -O0 deixava a execução MUITO
-            # mais lenta que o binário do "aresy arquivo.ay" equivalente.
-            compile_ir_to_binary(self.clang_path, ir, bin_path, self.target_triple, opt_level="-O2")
+            # -O0 no REPL: o programa roda uma vez só e é minúsculo, então
+            # otimizar não ganha nada em runtime — só custa tempo de clang
+            # a cada Enter. "aresy build"/"aresy arquivo.ay" continuam em
+            # -O2 (compile_ir_to_binary usa -O2 por padrão), que é onde a
+            # otimização realmente importa (binário reaproveitado/rodado
+            # várias vezes ou por mais tempo).
+            compile_ir_to_binary(self.clang_path, ir, bin_path, self.target_triple, opt_level="-O0")
             proc = subprocess.run([bin_path], capture_output=True, text=True)
 
         out = proc.stdout
