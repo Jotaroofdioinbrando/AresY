@@ -36,6 +36,7 @@ Diferenças em relação ao protótipo antigo (corrigidas):
 import sys
 import re
 import struct
+import math as _pymath
 
 # ---------------------------------------------------------------------------
 # 1. LEXER
@@ -47,12 +48,12 @@ TOKEN_SPEC = [
     ("STRING",   r'"[^"]*"'),
     ("ID",       r"[A-Za-z_][A-Za-z0-9_]*"),
     ("COMMENT",  r"//.*"),
-    ("OP",       r"==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~]"),
+    ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~]"),
     ("NEWLINE",  r"\n"),
     ("SKIP",     r"[ \t]+"),
 ]
 MASTER_RE = re.compile("|".join(f"(?P<{n}>{p})" for n, p in TOKEN_SPEC))
-KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false"}
+KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false", "extern", "import"}
 
 
 class Token:
@@ -123,6 +124,11 @@ class Return:
     def __init__(self, expr): self.expr = expr
 class ExprStmt:
     def __init__(self, expr): self.expr = expr
+class ExternDecl:
+    def __init__(self, name, param_types, ret_type):
+        self.name, self.param_types, self.ret_type = name, param_types, ret_type
+class ImportDecl:
+    def __init__(self, name): self.name = name
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +162,34 @@ class Parser:
         self.expect("OP")  # }
         return stmts
 
+    EXTERN_TYPES = {"i64", "f64", "void"}
+
     def parse_statement(self):
         tok = self.peek()
+        if tok.kind == "IMPORT":
+            self.advance()
+            lib = self.expect("STRING").value[1:-1]
+            return ImportDecl(lib)
+        if tok.kind == "EXTERN":
+            self.advance()
+            self.expect("FN")
+            name = self.expect("ID").value
+            self.expect("OP")  # (
+            param_types = []
+            while self.peek().value != ")":
+                t = self.expect("ID").value
+                if t not in self.EXTERN_TYPES:
+                    raise SyntaxError(f"Tipo '{t}' inválido em extern — use i64, f64 ou void")
+                param_types.append(t)
+                if self.peek().value == ",": self.advance()
+            self.expect("OP")  # )
+            ret_type = "i64"
+            if self.peek().value == "->":
+                self.advance()
+                ret_type = self.expect("ID").value
+                if ret_type not in self.EXTERN_TYPES:
+                    raise SyntaxError(f"Tipo '{ret_type}' inválido em extern — use i64, f64 ou void")
+            return ExternDecl(name, param_types, ret_type)
         if tok.kind == "FN": return self.parse_funcdef()
         if tok.kind == "IF": return self.parse_if()
         if tok.kind == "WHILE": return self.parse_while()
@@ -318,6 +350,19 @@ BUILTIN_DECLARES = (
     'declare i64 @strlen(i8*)\n'
     'declare i8* @strcpy(i8*, i8*)\n'
     'declare i8* @strcat(i8*, i8*)\n'
+    # --- Math (libm, já linkada via -lm no clang) ---
+    'declare double @sin(double)\n'
+    'declare double @cos(double)\n'
+    'declare double @tan(double)\n'
+    'declare double @atan(double)\n'
+    'declare double @atan2(double, double)\n'
+    'declare double @log(double)\n'
+    'declare double @log10(double)\n'
+    'declare double @exp(double)\n'
+    'declare double @pow(double, double)\n'
+    'declare double @floor(double)\n'
+    'declare double @ceil(double)\n'
+    'declare double @fabs(double)\n'
 )
 FMT_CONSTANTS = (
     '@fmt_int = private unnamed_addr constant [5 x i8] c"%ld\\0A\\00"\n'
@@ -345,7 +390,8 @@ class CodeGen:
         self.target_triple = target_triple
         self.counter = 0
         self.strings = []
-        self.functions = {}   # name -> {'params': [...], 'ret': 'i64'|'double'|'void'}
+        self.functions = {}   # name -> {'params': [...], 'ret': 'i64'|'double'|'void', 'extern': bool}
+        self.imports = []     # nomes de libs de "import" (viram -lNOME na hora de linkar)
 
     def new_id(self):
         self.counter += 1
@@ -378,13 +424,33 @@ class CodeGen:
         if isinstance(node, BinOp): return self._guess_type(node.left)
         return "i64"
 
+    EXTERN_TYPE_MAP = {"i64": "i64", "f64": "double", "void": "void"}
+
     def compile_program(self, stmts):
         funcdefs = [s for s in stmts if isinstance(s, FuncDef)]
+        externs = [s for s in stmts if isinstance(s, ExternDecl)]
+        imports = [s for s in stmts if isinstance(s, ImportDecl)]
         if not any(f.name == "main" for f in funcdefs):
             raise CompileError("Programa precisa de uma função main()")
 
+        self.imports = [i.name for i in imports]
+
+        extern_ir = []
+        for e in externs:
+            if e.name in self.functions:
+                raise CompileError(f"'{e.name}' já foi declarada (extern duplicado ou conflito com fn)")
+            param_ts = [self.EXTERN_TYPE_MAP[t] for t in e.param_types]
+            ret_t = self.EXTERN_TYPE_MAP[e.ret_type]
+            self.functions[e.name] = {"params": param_ts, "ret": ret_t, "extern": True}
+            llvm_ret = "void" if ret_t == "void" else ret_t
+            extern_ir.append(f"declare {llvm_ret} @{e.name}({', '.join(param_ts)})")
+
         for f in funcdefs:
-            self.functions[f.name] = {"params": f.params, "ret": self._scan_return_type(f.body)}
+            if f.name in self.functions:
+                raise CompileError(f"'{f.name}' já foi declarada (conflito com extern)")
+            self.functions[f.name] = {
+                "params": f.params, "ret": self._scan_return_type(f.body), "extern": False,
+            }
 
         body_ir = []
         for f in funcdefs:
@@ -393,7 +459,7 @@ class CodeGen:
         header = ""
         if self.target_triple:
             header += f'target triple = "{self.target_triple}"\n'
-        header += BUILTIN_DECLARES + FMT_CONSTANTS + "\n"
+        header += BUILTIN_DECLARES + FMT_CONSTANTS + "\n" + "\n".join(extern_ir) + "\n"
         return header + "\n".join(self.strings) + "\n" + "\n".join(body_ir)
 
     def gen_function(self, node):
@@ -717,6 +783,55 @@ class CodeGen:
             lines.append(f"  %rr_{uid} = srem i64 %rc_{uid}, {mv}")
             return "i64", f"%rr_{uid}"
 
+        SINGLE_ARG_MATH = {
+            "sin": "sin", "cos": "cos", "tan": "tan", "atan": "atan",
+            "log": "log", "log10": "log10", "exp": "exp",
+            "floor": "floor", "ceil": "ceil",
+        }
+        if name in SINGLE_ARG_MATH:
+            t, v = self.gen_expr(node.args[0], env, lines)
+            v = self.cast(lines, t, v, "double")
+            lines.append(f"  %m_{uid} = call double @{SINGLE_ARG_MATH[name]}(double {v})")
+            return "double", f"%m_{uid}"
+
+        if name in ("pow", "atan2"):
+            llvm_name = "pow" if name == "pow" else "atan2"
+            t1, v1 = self.gen_expr(node.args[0], env, lines)
+            t2, v2 = self.gen_expr(node.args[1], env, lines)
+            v1 = self.cast(lines, t1, v1, "double")
+            v2 = self.cast(lines, t2, v2, "double")
+            lines.append(f"  %m_{uid} = call double @{llvm_name}(double {v1}, double {v2})")
+            return "double", f"%m_{uid}"
+
+        if name == "pi":
+            return "double", fmt_double_literal(_pymath.pi)
+
+        if name == "abs":
+            t, v = self.gen_expr(node.args[0], env, lines)
+            if t == "double":
+                lines.append(f"  %m_{uid} = call double @fabs(double {v})")
+                return "double", f"%m_{uid}"
+            lines.append(f"  %neg_{uid} = sub nsw i64 0, {v}")
+            lines.append(f"  %isneg_{uid} = icmp slt i64 {v}, 0")
+            lines.append(f"  %m_{uid} = select i1 %isneg_{uid}, i64 %neg_{uid}, i64 {v}")
+            return "i64", f"%m_{uid}"
+
+        if name in ("min", "max"):
+            t1, v1 = self.gen_expr(node.args[0], env, lines)
+            t2, v2 = self.gen_expr(node.args[1], env, lines)
+            is_float = t1 == "double" or t2 == "double"
+            if is_float:
+                v1 = self.cast(lines, t1, v1, "double")
+                v2 = self.cast(lines, t2, v2, "double")
+                op = "olt" if name == "min" else "ogt"
+                lines.append(f"  %cmp_{uid} = fcmp {op} double {v1}, {v2}")
+                lines.append(f"  %m_{uid} = select i1 %cmp_{uid}, double {v1}, double {v2}")
+                return "double", f"%m_{uid}"
+            op = "slt" if name == "min" else "sgt"
+            lines.append(f"  %cmp_{uid} = icmp {op} i64 {v1}, {v2}")
+            lines.append(f"  %m_{uid} = select i1 %cmp_{uid}, i64 {v1}, i64 {v2}")
+            return "i64", f"%m_{uid}"
+
         if name in env:
             # variável local (normalmente um parâmetro) guardando um ponteiro
             # de função, ex.: fn executar(func, x, y) { return func(x, y) }.
@@ -742,17 +857,19 @@ class CodeGen:
             return "i64", f"%ind_{uid}"
 
         if name not in self.functions:
-            raise CompileError(f"Função '{name}' não existe")
+            raise CompileError(f"Função '{name}' não existe (nem foi declarada com 'extern')")
         sig = self.functions[name]
         if len(sig["params"]) != len(node.args):
             raise CompileError(f"'{name}' espera {len(sig['params'])} argumento(s), recebeu {len(node.args)}")
+        is_extern = sig.get("extern", False)
         arg_strs = []
-        for a in node.args:
+        for i, a in enumerate(node.args):
             t, v = self.gen_expr(a, env, lines)
             if t == "str":
-                raise CompileError(f"'{name}': funções definidas pelo usuário ainda não aceitam argumentos do tipo string")
-            v = self.cast(lines, t, v, "i64")
-            arg_strs.append(f"i64 {v}")
+                raise CompileError(f"'{name}': argumentos do tipo string ainda não são aceitos em chamadas de função")
+            param_t = sig["params"][i] if is_extern else "i64"
+            v = self.cast(lines, t, v, param_t)
+            arg_strs.append(f"{param_t} {v}")
         ret_t = sig["ret"]
         if ret_t == "void":
             lines.append(f"  call void @{name}({', '.join(arg_strs)})")
@@ -790,12 +907,15 @@ class NativeError(Exception):
     pass
 
 
-def compile_ir_to_binary(clang_path, ir_source, out_path, target_triple=None, opt_level="-O2"):
+def compile_ir_to_binary(clang_path, ir_source, out_path, target_triple=None, opt_level="-O2", extra_libs=None):
     with tempfile.TemporaryDirectory() as td:
         ll_path = os.path.join(td, "prog.ll")
         with open(ll_path, "w") as f:
             f.write(ir_source)
-        cmd = [clang_path, opt_level, ll_path, "-lm", "-o", out_path]
+        cmd = [clang_path, opt_level, ll_path, "-lm"]
+        for lib in (extra_libs or []):
+            cmd.append(f"-l{lib}")
+        cmd += ["-o", out_path]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise NativeError(proc.stderr.strip() or "clang falhou ao compilar")
@@ -809,14 +929,14 @@ def run_file_native(path, target_triple=None):
     with open(path) as f:
         src = f.read()
     try:
-        ir = compile_source(src, target_triple=target_triple)
+        ir, imports = compile_source(src, target_triple=target_triple)
     except (CompileError, SyntaxError) as e:
         print(f"Erro de compilação: {e}")
         sys.exit(1)
     with tempfile.TemporaryDirectory() as td:
         bin_path = os.path.join(td, "programa")
         try:
-            compile_ir_to_binary(clang_path, ir, bin_path, target_triple)
+            compile_ir_to_binary(clang_path, ir, bin_path, target_triple, extra_libs=imports)
         except NativeError as e:
             print(f"Erro do clang:\n{e}")
             sys.exit(1)
@@ -872,9 +992,11 @@ class ReplSession:
         self.target_triple = target_triple
         self.codegen = CodeGen(target_triple=target_triple)
         self.func_ir = {}       # nome -> IR já gerado da função
+        self.extern_ir = []     # linhas "declare" de funções extern registradas
         self.var_types = {}     # nome -> "i64" | "double"
         self.var_values = {}    # nome -> valor atual conhecido
         self.array_vars = set()  # variáveis que guardam array (não persistem)
+        self.str_vars = set()    # variáveis do tipo string (também não persistem)
 
     def _literal(self, t, v):
         return str(int(v)) if t == "i64" else str(float(v))
@@ -890,8 +1012,19 @@ class ReplSession:
                 self.codegen.functions[s.name] = {
                     "params": s.params,
                     "ret": self.codegen._scan_return_type(s.body),
+                    "extern": False,
                 }
                 self.func_ir[s.name] = self.codegen.gen_function(s)
+            elif isinstance(s, ImportDecl):
+                if s.name not in self.codegen.imports:
+                    self.codegen.imports.append(s.name)
+            elif isinstance(s, ExternDecl):
+                param_ts = [CodeGen.EXTERN_TYPE_MAP[t] for t in s.param_types]
+                ret_t = CodeGen.EXTERN_TYPE_MAP[s.ret_type]
+                self.codegen.functions[s.name] = {"params": param_ts, "ret": ret_t, "extern": True}
+                self.extern_ir.append(
+                    f"declare {ret_t} @{s.name}({', '.join(param_ts)})"
+                )
             else:
                 new_stmts.append(s)
 
@@ -914,6 +1047,7 @@ class ReplSession:
             lines.append(f"  store {t} {self._literal(t, v)}, {t}* %{name}, align 8")
             env[name] = t
 
+        newly_non_persistent = []
         for s in new_stmts:
             if isinstance(s, VarDecl):
                 if s.name in env:
@@ -921,11 +1055,26 @@ class ReplSession:
                     s = Assign(s.name, s.expr)
                 else:
                     self.array_vars.discard(s.name)
+                    self.str_vars.discard(s.name)
                     if isinstance(s.expr, Call) and s.expr.name == "array":
                         self.array_vars.add(s.name)
+                        newly_non_persistent.append(s.name)
             self.codegen.gen_stmt(s, env, lines, "i32")
+            # variáveis do tipo "str" só sabemos o tipo depois de gerar o
+            # statement (é o gen_stmt que preenche env[name]); então marcamos
+            # aqui, olhando o tipo já resolvido.
+            if isinstance(s, (VarDecl, Assign)) and env.get(s.name) == "str" and s.name not in self.str_vars:
+                self.str_vars.add(s.name)
+                if s.name not in newly_non_persistent:
+                    newly_non_persistent.append(s.name)
 
-        trackable = [n for n in env if n not in self.array_vars]
+        # strings e arrays não sobrevivem entre rounds do REPL: strings porque
+        # não temos como serializar/desserializar um ponteiro i8* de um
+        # processo pro outro sem reconstituir o conteúdo, arrays pelo mesmo
+        # motivo (o malloc do processo anterior já não existe mais). Excluir
+        # os dois do rastreamento evita que o bug antigo aconteça de novo:
+        # tentar ler a string de volta como número e ela sumir sem aviso.
+        trackable = [n for n in env if n not in self.array_vars and n not in self.str_vars]
         self.codegen.gen_stmt(Print(Str('"' + STATE_BEGIN + '"')), env, lines, "i32")
         for name in trackable:
             self.codegen.gen_stmt(Print(Var(name)), env, lines, "i32")
@@ -936,7 +1085,7 @@ class ReplSession:
         header = ""
         if self.target_triple:
             header += f'target triple = "{self.target_triple}"\n'
-        header += BUILTIN_DECLARES + FMT_CONSTANTS + "\n"
+        header += BUILTIN_DECLARES + FMT_CONSTANTS + "\n" + "\n".join(self.extern_ir) + "\n"
         ir = (header + "\n".join(self.codegen.strings) + "\n"
               + "\n".join(self.func_ir.values()) + "\n" + body)
 
@@ -947,7 +1096,10 @@ class ReplSession:
             # blocos com loop pesado (ex.: um "while" de centenas de
             # milhões de iterações), onde -O0 deixava a execução MUITO
             # mais lenta que o binário do "aresy arquivo.ay" equivalente.
-            compile_ir_to_binary(self.clang_path, ir, bin_path, self.target_triple, opt_level="-O2")
+            compile_ir_to_binary(
+                self.clang_path, ir, bin_path, self.target_triple,
+                opt_level="-O2", extra_libs=self.codegen.imports,
+            )
             proc = subprocess.run([bin_path], capture_output=True, text=True)
 
         out = proc.stdout
@@ -965,6 +1117,10 @@ class ReplSession:
                 self.var_types[name] = t
             except ValueError:
                 pass
+
+        if newly_non_persistent:
+            nomes = ", ".join(newly_non_persistent)
+            before += f"(nota: {nomes} não vai persistir pra próxima linha — strings e arrays não sobrevivem entre rounds do REPL ainda; use um arquivo .ay pra isso)\n"
 
         return before, proc.returncode
 
@@ -1025,9 +1181,12 @@ def repl(target_triple=None):
 # ---------------------------------------------------------------------------
 
 def compile_source(source, target_triple=None):
+    """Retorna (ir_llvm, lista_de_libs_importadas)."""
     tokens = tokenize(source)
     ast = Parser(tokens).parse_program()
-    return CodeGen(target_triple=target_triple).compile_program(ast)
+    codegen = CodeGen(target_triple=target_triple)
+    ir = codegen.compile_program(ast)
+    return ir, codegen.imports
 
 
 def _build_native(argv):
@@ -1042,13 +1201,14 @@ def _build_native(argv):
         triple = argv[argv.index("--triple") + 1]
     out_path = argv[1] if len(argv) > 1 and not argv[1].startswith("--") else "out.ll"
     try:
-        ir = compile_source(src, target_triple=triple)
+        ir, imports = compile_source(src, target_triple=triple)
     except (CompileError, SyntaxError) as e:
         print(f"Erro de compilação: {e}")
         sys.exit(1)
     with open(out_path, "w") as f:
         f.write(ir)
-    print(f"IR gerado em {out_path}. Compile com:\n  clang -O3 -ffast-math {out_path} -lm -o programa")
+    extra_libs = "".join(f" -l{lib}" for lib in imports)
+    print(f"IR gerado em {out_path}. Compile com:\n  clang -O3 -ffast-math {out_path} -lm{extra_libs} -o programa")
 
 
 def _extract_triple(argv):

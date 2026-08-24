@@ -1,0 +1,8 @@
+fn calcular_area_circulo(raio) {
+    var pi = 3.141592653589793
+    return pi * (raio * raio)
+}
+
+fn calcular_hipotenusa(a, b) {
+    return math.sqrt((a * a) + (b * b))
+}
