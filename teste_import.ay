@@ -1,0 +1,7 @@
+import "modulo_teste.ay"
+
+fn main() {
+    var x = gritar("ola aresy")
+    print(x)
+    return 0
+}

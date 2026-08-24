@@ -1,0 +1,6 @@
+fn main() {
+    print("A\\B")
+    print("C\\D\\E")
+    print("normal")
+    return 0
+}

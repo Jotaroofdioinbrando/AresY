@@ -1,0 +1,50 @@
+// stdlib/strings.ay — funções auxiliares de string pra aresY.
+// Importe assim: import "stdlib/strings.ay"
+
+fn eh_vazia(s: str) -> i64 {
+    return len(s) == 0
+}
+
+fn repetir(s: str, vezes: i64) -> str {
+    var resultado = ""
+    var i = 0
+    while i < vezes {
+        resultado = resultado + s
+        i = i + 1
+    }
+    return resultado
+}
+
+fn inverter(s: str) -> str {
+    var resultado = ""
+    var i = len(s) - 1
+    while i >= 0 {
+        resultado = resultado + char_at(s, i)
+        i = i - 1
+    }
+    return resultado
+}
+
+fn eh_palindromo(s: str) -> i64 {
+    return s == inverter(s)
+}
+
+fn contem(s: str, sub: str) -> i64 {
+    var tam_s = len(s)
+    var tam_sub = len(sub)
+    if tam_sub == 0 {
+        return 1
+    }
+    if tam_sub > tam_s {
+        return 0
+    }
+    var limite = tam_s - tam_sub
+    var i = 0
+    while i <= limite {
+        if substr(s, i, tam_sub) == sub {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}

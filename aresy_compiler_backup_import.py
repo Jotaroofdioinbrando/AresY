@@ -38,132 +38,6 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "0.4.0"
-
-HOW_TEXT = """\
-aresY — resumo rápido da sintaxe (aresy --how)
-================================================
-
-Todo programa executável precisa de uma fn main() { ... }.
-Comentário: // até o fim da linha.
-
---- Variáveis ---
-    var x = 10            // tipo inferido pelo valor (i64/double/str)
-    x = x + 1              // reatribuição (a variável já precisa existir)
-
---- Tipos ---
-    i64             inteiro 64 bits (padrão pra números sem ponto)
-    double (ou f64) ponto flutuante 64 bits
-    str (ou string) texto
-    void            só usado em retorno de função / extern
-
---- Funções ---
-    fn soma(a, b) {                     // sem anotação: parâmetros e
-        return a + b                    // retorno assumem i64
-    }
-    fn media(a: double, b: double) -> double {   // com tipos explícitos
-        return (a + b) / 2.0
-    }
-    fn saudacao(nome: str) -> str {
-        return "Olá, " + nome
-    }
-
---- Controle de fluxo ---
-    if cond { ... } else { ... }        // "else" é opcional
-    while cond { ... }
-    return expr                          // ou "return" sozinho (void)
-
---- Operadores ---
-    Aritméticos:  +  -  *  /  %
-    Comparação:   ==  !=  <  >  <=  >=
-    Bitwise:      &  |  ^   (só com inteiros)
-    Unário:       -x
-
---- Literais ---
-    10              inteiro
-    3.14            float
-    1e-7, 2.5E10    float em notação científica
-    "texto"         string (aceita \\n \\t \\" \\\\ etc.)
-    true / false    booleano (vira 1/0 internamente)
-
---- Strings ---
-    a + b                    concatenação
-    a == b, a != b            igualdade de conteúdo (não de ponteiro)
-    len(s)                    tamanho
-    upper(s) / lower(s)       maiúsculas / minúsculas
-    substr(s, inicio, tam)    fatia
-    char_at(s, i)             caractere na posição i (como string de 1)
-    str(numero)               converte i64/double pra string
-
---- Arrays (só de i64, tamanho fixo) ---
-    var arr = array(5)        // aloca 5 posições
-    arr[0] = 42
-    print(arr[0])
-    // não tem bounds checking — cuidado com índice fora do intervalo
-
---- Exceções ---
-    fn divide(a, b) {
-        if b == 0 { throw "divisao por zero" }
-        return a / b
-    }
-    try {
-        var r = divide(10, 0)
-    } catch e {
-        print("Erro: " + e)     // "e" é sempre string
-    }
-    // uma exceção não capturada propaga pra cima da pilha de chamadas
-    // até achar um catch; se nenhum try pegar, o programa imprime o
-    // erro e sai com código 1.
-
---- Funções nativas (builtins) ---
-    Matemática:  sqrt(x) sin(x) cos(x) tan(x) atan(x) atan2(y,x)
-                 log(x) log10(x) exp(x) pow(b,e) floor(x) ceil(x)
-                 abs(x) min(a,b) max(a,b) pi()
-    Tempo:       time() -> segundos desde epoch (double)
-                 sleep(segundos) -> pausa a execução (aceita float)
-    Aleatório:   random(n) -> inteiro entre 0 e n-1
-    E/S:         input() -> lê um i64 do teclado
-                 read_line() -> lê uma linha (str, sem o \\n do fim)
-                 read_file(caminho) -> conteúdo do arquivo (str)
-                 write_file(caminho, conteudo) -> sobrescreve (retorna 1/0)
-                 append_file(caminho, conteudo) -> acrescenta (retorna 1/0)
-    print(expr)  imprime qualquer i64/double/str com \\n no final
-
---- Ponteiro de função (callback) ---
-    fn somar(a, b) { return a + b }
-    fn aplicar(func, x, y) { return func(x, y) }
-    aplicar(somar, 2, 3)      // passa a função como valor (assume i64)
-
---- extern: chamar função de biblioteca C ---
-    import "m"                          // linka -lm na hora de compilar
-    extern fn cbrt(f64) -> f64           // tipos aceitos aqui: i64, f64, void
-    cbrt(27.0)
-
---- import: bibliotecas nativas escritas em aresY (.ay) ---
-    import "stdlib/mathx.ay"            // caminho relativo ao arquivo atual
-    import geometria                     // sem aspas: procura geometria.ay
-                                          // no mesmo diretório
-    geometria.calcular_area_circulo(5.0) // chamada com prefixo (opcional,
-                                          // é só documentação — a função
-                                          // já está disponível sem prefixo
-                                          // também)
-
---- Rodando programas ---
-    aresy                       modo interativo (REPL, nativo via clang)
-    aresy programa.ay           compila e roda direto
-    aresy run programa.ay       mesma coisa, explícito
-    aresy build programa.ay saida.ll   gera só o LLVM IR
-    aresy --version             mostra a versão
-    aresy --help                lista de comandos e flags
-    aresy --how                 este resumo de sintaxe
-
-    Flags extras (valem em qualquer comando acima):
-    --triple TRIPLE   define o target LLVM (ex.: pra compilar cruzado)
-    --no-gc           compila sem o coletor de lixo (Boehm GC), usa
-                      malloc puro — útil se não tiver a libgc instalada
-"""
-
-
 # ---------------------------------------------------------------------------
 # 1. LEXER
 # ---------------------------------------------------------------------------
@@ -174,7 +48,7 @@ TOKEN_SPEC = [
     ("STRING",   r'"(?:\\.|[^"\\])*"'),
     ("ID",       r"[A-Za-z_][A-Za-z0-9_]*"),
     ("COMMENT",  r"//.*"),
-    ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~:.]"),
+    ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~:]"),
     ("NEWLINE",  r"\n"),
     ("SKIP",     r"[ \t]+"),
 ]
@@ -328,17 +202,8 @@ class Parser:
         tok = self.peek()
         if tok.kind == "IMPORT":
             self.advance()
-            if self.peek().kind == "STRING":
-                lib = self.advance().value[1:-1]
-                return ImportDecl(lib)
-            # import sem aspas: nome de módulo — procura "<nome>.ay" no
-            # mesmo diretório do arquivo que faz o import (ex.: 'import
-            # geometria' carrega 'geometria.ay'). Depois disso, chamadas
-            # qualificadas como 'geometria.calcular_area(x)' funcionam
-            # (ver parse_atom) — o prefixo é só documentação, a função
-            # já foi trazida pro escopo global pelo import em si.
-            mod = self.expect("ID").value
-            return ImportDecl(mod + ".ay")
+            lib = self.expect("STRING").value[1:-1]
+            return ImportDecl(lib)
         if tok.kind == "EXTERN":
             self.advance()
             self.expect("FN")
@@ -506,20 +371,6 @@ class Parser:
             self.advance(); return Bool(False)
         if tok.kind == "ID":
             name = self.advance().value
-            if self.peek().value == "." and self.peek(1).kind == "ID":
-                # chamada qualificada por módulo: 'modulo.funcao(args)'. O
-                # prefixo é só pra documentar de onde a função veio — o
-                # import já trouxe ela pro escopo global (mesma ideia de um
-                # "#include"), então aqui a gente só usa o nome real.
-                self.advance()  # .
-                real_name = self.advance().value
-                if self.peek().value != "(":
-                    raise SyntaxError(
-                        f"Esperado uma chamada de função depois de '{name}.{real_name}' "
-                        "— acessar uma variável de outro módulo (tipo 'modulo.x' sem "
-                        "parênteses) ainda não é suportado"
-                    )
-                name = real_name
             if self.peek().value == "(":
                 self.advance()
                 args = []
@@ -555,7 +406,6 @@ BUILTIN_DECLARES = (
     'declare i8* @malloc(i64)\n'
     'declare i32 @rand()\n'
     'declare void @srand(i32)\n'
-    'declare i32 @usleep(i32)\n'
     'declare i64 @strlen(i8*)\n'
     'declare i8* @strcpy(i8*, i8*)\n'
     'declare i8* @strcat(i8*, i8*)\n'
@@ -838,12 +688,6 @@ class CodeGen:
             lines.append(f"  %cast_{uid} = fptosi double {value_reg} to i32")
         elif value_type == "i32" and target_type == "i64":
             lines.append(f"  %cast_{uid} = sext i32 {value_reg} to i64")
-        elif value_type == "i1" and target_type == "i64":
-            lines.append(f"  %cast_{uid} = zext i1 {value_reg} to i64")
-        elif value_type == "i1" and target_type == "double":
-            lines.append(f"  %cast_{uid} = uitofp i1 {value_reg} to double")
-        elif value_type == "i64" and target_type == "i1":
-            lines.append(f"  %cast_{uid} = icmp ne i64 {value_reg}, 0")
         else:
             return value_reg  # tipos iguais ou combinação não esperada
         return f"%cast_{uid}"
@@ -921,14 +765,8 @@ class CodeGen:
                     lines.append(f"  %pf_{uid} = getelementptr [4 x i8], [4 x i8]* @fmt_str, i32 0, i32 0")
                     lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, i8* {v})")
                 else:
-                    # normaliza pra i64 antes de imprimir — "t" pode vir como
-                    # i1 (resultado cru de uma comparação, ex. print(a > b))
-                    # ou i32; sem isso o printf recebia um valor cujo tipo
-                    # real não batia com o "%ld" do formato (bits de cima
-                    # indefinidos = número aleatório impresso).
-                    v = self.cast(lines, t, v, "i64")
                     lines.append(f"  %pf_{uid} = getelementptr [5 x i8], [5 x i8]* @fmt_int, i32 0, i32 0")
-                    lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, i64 {v})")
+                    lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, {t} {v})")
 
         elif isinstance(node, If):
             uid = self.new_id()
@@ -1082,7 +920,7 @@ class CodeGen:
                     lines.append(f"  %scmp_{uid} = call i32 @strcmp(i8* {v1}, i8* {v2})")
                     pred = "eq" if node.op == "==" else "ne"
                     lines.append(f"  %cmp_{uid} = icmp {pred} i32 %scmp_{uid}, 0")
-                    return "i1", f"%cmp_{uid}"
+                    return "i64", f"%cmp_{uid}"
                 if node.op != "+":
                     raise CompileError(f"Operador '{node.op}' não é suportado para strings (só '+', '==' e '!=')")
                 lines.append(f"  %l1_{uid} = call i64 @strlen(i8* {v1})")
@@ -1112,10 +950,8 @@ class CodeGen:
             if node.op in ("&", "|", "^"):
                 if is_float:
                     raise CompileError(f"Operador '{node.op}' (bitwise) não é suportado com float — use inteiros")
-                v1i = self.cast(lines, t1, v1, "i64")
-                v2i = self.cast(lines, t2, v2, "i64")
                 instr = {"&": "and", "|": "or", "^": "xor"}[node.op]
-                lines.append(f"  %tmp_{uid} = {instr} i64 {v1i}, {v2i}")
+                lines.append(f"  %tmp_{uid} = {instr} i64 {v1}, {v2}")
                 return "i64", f"%tmp_{uid}"
 
             if is_float:
@@ -1125,14 +961,8 @@ class CodeGen:
                 lines.append(f"  %tmp_{uid} = {instr} double {v1}, {v2}")
                 return "double", f"%tmp_{uid}"
             else:
-                # normaliza operandos "estranhos" (ex.: i1 vindo direto de uma
-                # comparação, tipo "1 + (a > b)") pra i64 antes da aritmética —
-                # sem isso, a instrução declarava i64 mas o registrador real
-                # podia ser i1, o que o LLVM rejeita (tipo incompatível).
-                v1i = self.cast(lines, t1, v1, "i64")
-                v2i = self.cast(lines, t2, v2, "i64")
                 instr = {"+": "add nsw", "-": "sub nsw", "*": "mul nsw", "/": "sdiv", "%": "srem"}[node.op]
-                lines.append(f"  %tmp_{uid} = {instr} i64 {v1i}, {v2i}")
+                lines.append(f"  %tmp_{uid} = {instr} i64 {v1}, {v2}")
                 return "i64", f"%tmp_{uid}"
 
         if isinstance(node, IndexGet):
@@ -1188,16 +1018,6 @@ class CodeGen:
             lines.append(f"  call i32 (i8*, ...) @scanf(i8* %fs_{uid}, i64* %iv_{uid})")
             lines.append(f"  %rv_{uid} = load i64, i64* %iv_{uid}, align 8")
             return "i64", f"%rv_{uid}"
-
-        if name == "sleep":
-            if len(node.args) != 1:
-                raise CompileError("'sleep' espera 1 argumento: sleep(segundos) — aceita inteiro ou float")
-            t, v = self.gen_expr(node.args[0], env, lines)
-            v = self.cast(lines, t, v, "double")
-            lines.append(f"  %slus_d_{uid} = fmul double {v}, 1000000.0")
-            lines.append(f"  %slus_{uid} = fptosi double %slus_d_{uid} to i32")
-            lines.append(f"  call i32 @usleep(i32 %slus_{uid})")
-            return "i64", "0"
 
         if name == "random":
             t, mv = self.gen_expr(node.args[0], env, lines)
@@ -1504,48 +1324,6 @@ import subprocess
 import tempfile
 
 
-def _read_ay_source(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError as e:
-        raise CompileError(f"Não foi possível abrir a biblioteca '{path}': {e}")
-
-
-def expand_ay_imports(stmts, base_dir, seen):
-    """Resolve `import "arquivo.ay"` de forma recursiva, trazendo as fn/extern
-    declaradas no arquivo importado pro programa atual — uma espécie de
-    "#include" simples: sem namespace, sem exportação seletiva, tudo que a
-    biblioteca declara no topo do arquivo fica visível pra quem importou.
-
-    `import "nome_de_lib_C"` (sem terminar em .ay) continua funcionando como
-    antes — vira -lNOME na hora de linkar com o clang — e não é tocado aqui.
-
-    `seen` é um set de caminhos absolutos já importados nesse programa (ou,
-    no REPL, na sessão inteira); evita reimportar o mesmo arquivo duas vezes
-    e evita loop infinito em import circular (a -> b -> a)."""
-    out = []
-    for s in stmts:
-        if isinstance(s, ImportDecl) and s.name.endswith(".ay"):
-            lib_path = os.path.normpath(os.path.join(base_dir, s.name))
-            if lib_path in seen:
-                continue
-            if not os.path.isfile(lib_path):
-                raise CompileError(f"Biblioteca '{s.name}' não encontrada (procurei em {lib_path})")
-            seen.add(lib_path)
-            lib_src = _read_ay_source(lib_path)
-            lib_stmts = Parser(tokenize(lib_src)).parse_program()
-            if any(isinstance(x, FuncDef) and x.name == "main" for x in lib_stmts):
-                raise CompileError(
-                    f"'{s.name}' foi importada com 'import' — bibliotecas não podem "
-                    "definir main() (só o arquivo principal pode)"
-                )
-            out.extend(expand_ay_imports(lib_stmts, os.path.dirname(lib_path), seen))
-        else:
-            out.append(s)
-    return out
-
-
 def find_clang():
     for candidate in ("clang", "clang-19", "clang-18", "clang-17", "clang-16"):
         path = shutil.which(candidate)
@@ -1590,7 +1368,7 @@ def run_file_native(path, target_triple=None, use_gc=True):
     with open(path) as f:
         src = f.read()
     try:
-        ir, imports = compile_source(src, target_triple=target_triple, use_gc=use_gc, source_path=path)
+        ir, imports = compile_source(src, target_triple=target_triple, use_gc=use_gc)
     except (CompileError, SyntaxError) as e:
         print(f"Erro de compilação: {e}")
         sys.exit(1)
@@ -1660,7 +1438,6 @@ class ReplSession:
         self.var_values = {}    # nome -> valor atual conhecido
         self.array_vars = set()  # variáveis que guardam array (não persistem)
         self.str_vars = set()    # variáveis do tipo string (também não persistem)
-        self._imported_ay_files = set()  # caminhos absolutos de bibliotecas .ay já importadas na sessão
         self._gc_inited = False
 
     def _literal(self, t, v):
@@ -1671,7 +1448,6 @@ class ReplSession:
         são registradas; o resto vira um main() compilado e rodado na hora.
         Retorna (saida_do_usuario, codigo_de_saida) ou None se não rodou
         nada (bloco só definiu função)."""
-        stmts = expand_ay_imports(stmts, os.getcwd(), self._imported_ay_files)
         new_stmts = []
         for s in stmts:
             if isinstance(s, FuncDef):
@@ -1867,22 +1643,10 @@ def repl(target_triple=None, use_gc=True):
 # 7. DRIVER
 # ---------------------------------------------------------------------------
 
-def compile_source(source, target_triple=None, use_gc=True, source_path=None):
-    """Retorna (ir_llvm, lista_de_libs_importadas).
-
-    source_path, quando informado, é usado como base pra resolver imports
-    relativos de biblioteca .ay (ex.: import "stdlib/mathx.ay" a partir de
-    onde o arquivo principal está, não do diretório em que o `aresy` foi
-    chamado)."""
+def compile_source(source, target_triple=None, use_gc=True):
+    """Retorna (ir_llvm, lista_de_libs_importadas)."""
     tokens = tokenize(source)
     ast = Parser(tokens).parse_program()
-    if source_path:
-        base_dir = os.path.dirname(os.path.abspath(source_path))
-        seen = {os.path.normpath(os.path.abspath(source_path))}
-    else:
-        base_dir = os.getcwd()
-        seen = set()
-    ast = expand_ay_imports(ast, base_dir, seen)
     codegen = CodeGen(target_triple=target_triple, use_gc=use_gc)
     ir = codegen.compile_program(ast)
     return ir, codegen.imports
@@ -1902,7 +1666,7 @@ def _build_native(argv):
         triple = argv[argv.index("--triple") + 1]
     out_path = argv[1] if len(argv) > 1 and not argv[1].startswith("--") else "out.ll"
     try:
-        ir, imports = compile_source(src, target_triple=triple, use_gc=use_gc, source_path=argv[0])
+        ir, imports = compile_source(src, target_triple=triple, use_gc=use_gc)
     except (CompileError, SyntaxError) as e:
         print(f"Erro de compilação: {e}")
         sys.exit(1)
@@ -1935,9 +1699,6 @@ def _usage():
         "  aresy run programa.ay         mesma coisa, explícito\n"
         "  aresy build programa.ay [saida.ll] [--triple TRIPLE] [--no-gc]\n"
         "                                 gera LLVM IR pra compilar com clang na mão\n"
-        "  aresy --version               mostra a versão do compilador\n"
-        "  aresy --help                  mostra esta ajuda\n"
-        "  aresy --how                   mostra um resumo de toda a sintaxe da linguagem\n"
         "  (adicione --triple TRIPLE em qualquer comando acima se precisar\n"
         "   de um target diferente do padrão do seu aparelho)\n"
         "  (adicione --no-gc em qualquer comando acima pra compilar sem o\n"
@@ -1945,28 +1706,8 @@ def _usage():
     )
 
 
-def _version():
-    print(f"aresY {VERSION}")
-
-
-def _how():
-    print(HOW_TEXT)
-
-
 if __name__ == "__main__":
-    raw_args = sys.argv[1:]
-
-    # --version e --how são checados antes de tudo (não fazem sentido
-    # combinados com --triple/--no-gc/build/run, então nem entram no
-    # parsing normal de argumentos).
-    if raw_args and raw_args[0] == "--version":
-        _version()
-        sys.exit(0)
-    if raw_args and raw_args[0] == "--how":
-        _how()
-        sys.exit(0)
-
-    triple, use_gc, args = _extract_triple(raw_args)
+    triple, use_gc, args = _extract_triple(sys.argv[1:])
 
     if len(args) == 0:
         repl(target_triple=triple, use_gc=use_gc)
@@ -1980,10 +1721,6 @@ if __name__ == "__main__":
         run_file_native(args[1], target_triple=triple, use_gc=use_gc)
     elif args[0] in ("-h", "--help"):
         _usage()
-    elif args[0] == "--version":
-        _version()
-    elif args[0] == "--how":
-        _how()
     elif args[0].endswith(".ay"):
         run_file_native(args[0], target_triple=triple, use_gc=use_gc)
     else:

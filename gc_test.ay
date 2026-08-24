@@ -1,0 +1,18 @@
+fn cria_lixo(n) -> str {
+var texto = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+var numero = str(n)
+return texto + numero
+}
+
+fn main() {
+var i = 0
+var total = ""
+
+while i < 100000000 {
+var x = cria_lixo(i)
+total = x
+i = i + 1
+}
+
+print(total)
+}

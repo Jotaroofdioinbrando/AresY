@@ -1,0 +1,12 @@
+fn main() {
+    var texto = "AresY é foda"
+
+    print(texto)
+    print(len(texto))
+    print(upper(texto))
+    print(lower(texto))
+    print(substr(texto, 0, 5))
+    print(char_at(texto, 0))
+
+    return 0
+}

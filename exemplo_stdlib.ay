@@ -1,0 +1,18 @@
+// Exemplo de uso das bibliotecas nativas .ay que vêm com o aresY.
+import "stdlib/mathx.ay"
+import "stdlib/strings.ay"
+
+fn main() {
+    print(quadrado(7))
+    print(fatorial(6))
+    print(eh_primo(17))
+    print(eh_primo(18))
+    print(mdc(48, 18))
+
+    var s = "arara"
+    print(eh_palindromo(s))
+    print(contem("aresY compilador", "compil"))
+    print(repetir("ab", 3))
+
+    return 0
+}

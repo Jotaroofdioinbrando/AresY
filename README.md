@@ -1,17 +1,9 @@
 # aresY
 
-Linguagem aresY: sintaxe própria (baseada no protótipo antigo). Tem dois
-jeitos de rodar um programa:
-
-- **Modo dinâmico (interpretado)** — roda na hora, sem clang, tipo
-  `python arquivo.py`. É o que dá suporte ao REPL interativo também.
-- **Modo compilado** — sintaxe própria → LLVM IR → binário nativo via clang.
-  Mais rápido, mas precisa do clang instalado.
+Linguagem aresY: sintaxe própria, compila pra LLVM IR e usa o `clang` como
+backend (binário nativo de verdade, não interpretado).
 
 ## Instalar o comando `aresy` no Termux
-
-Assim dá pra digitar só `aresy` no terminal e cair direto no modo
-interativo, igual quando você digita `python` sozinho.
 
 ```
 pkg install clang python
@@ -30,17 +22,24 @@ já abre o REPL. (Se preferir não instalar, dá pra usar tudo com
 ## Uso
 
 ```
-aresy                          # abre o REPL (modo interativo, dinâmico)
-aresy programa.ay              # interpreta e roda direto, sem compilar
+aresy                          # abre o REPL (modo interativo, nativo)
+aresy programa.ay              # compila e roda direto
 aresy run programa.ay          # igual acima, forma explícita
-aresy build programa.ay saida.ll   # gera LLVM IR (fluxo antigo)
+aresy build programa.ay saida.ll [--triple TRIPLE] [--no-gc]
+                                # só gera o LLVM IR
+aresy --version                # mostra a versão do compilador
+aresy --help                   # lista de comandos e flags
+aresy --how                    # resumo de TODA a sintaxe da linguagem
+                                # (comece por aqui se for programar em aresY)
 ```
 
 Pra virar binário nativo depois do `build`:
 ```
-clang -O3 -ffast-math saida.ll -lm -o programa
+clang -O3 -ffast-math saida.ll -lm -lgc -o programa
 ./programa
 ```
+(o `-lgc` só é necessário se você não usou `--no-gc`; veja a seção sobre GC
+mais abaixo.)
 
 Se der erro de target no seu aparelho, gere o IR passando o triple certo:
 ```
@@ -51,7 +50,8 @@ aresy build exemplo.ay saida.ll --triple aarch64-unknown-linux-android24
 
 ```
 $ aresy
-aresY — modo interativo (dinâmico, sem compilar pra binário)
+aresY — modo interativo (compila e roda nativo via clang)
+GC (Boehm) ligado — pra desligar, sai e roda: aresy --no-gc
 Ctrl+D ou Ctrl+C pra sair.
 
 >>> var x = 10
@@ -64,53 +64,136 @@ Ctrl+D ou Ctrl+C pra sair.
 42
 ```
 
-Variáveis e funções declaradas ficam disponíveis pro resto da sessão
-(igual ao REPL do Python). Blocos com `{ }` (fn/if/while) podem ser escritos
-em várias linhas — o prompt muda pra `...` até fechar a chave. Toda
-expressão "solta" (sem `print`) tem o resultado ecoado automaticamente.
+Funções declaradas ficam disponíveis pro resto da sessão. Blocos com `{ }`
+(fn/if/while/try) podem ser escritos em várias linhas — o prompt muda pra
+`...` até fechar a chave. Toda expressão "solta" (sem `print`) tem o
+resultado ecoado automaticamente.
 
-### Diferenças do modo dinâmico em relação ao compilado
+**Limitação do REPL:** variáveis do tipo `str` e `array(n)` não persistem
+entre rounds (o processo anterior já terminou, e o ponteiro/`malloc` dele
+não existe mais no próximo). Pra usar isso de verdade, escreva um `.ay` e
+rode com `aresy arquivo.ay`.
 
-- Não tem tipos fixos: `var x = 10` depois aceitar `x = 1.5` sem erro
-  (no modo compilado, o tipo da variável é travado na primeira atribuição).
-- Não gera binário nem precisa de clang — roda direto em Python por baixo
-  dos panos, então é mais lento pra código pesado (loops gigantes, etc.).
-  Pra isso, use `aresy build` + clang.
+## Sintaxe — resumo rápido
 
-## Sintaxe suportada
+Rode `aresy --how` a qualquer momento pra ver isso direto no terminal.
+Aqui vai o essencial:
 
-- `fn nome(a, b) { ... }` — funções (parâmetros são sempre i64)
-- `var x = expr` — declaração (obrigatória antes de usar a variável)
-- `x = expr` — reatribuição
-- `if cond { } else { }`
-- `while cond { }`
-- `return expr` (ou `return` sem valor)
-- `print(expr)` ou `print("texto")`
-- Aritmética: `+ - * / %`, comparações `== != < > <= >=`, unário `-`
-- `true` / `false` — literais booleanos (agora funcionam; antes eram
-  reconhecidos pelo lexer mas o parser ignorava)
-- `array(n)` — aloca array de n inteiros (malloc, sem free — cuidado com uso longo)
-- `arr[i]` / `arr[i] = expr` — leitura/escrita no array (leitura solta, sem
-  atribuição, também funciona agora — antes só parseava se viesse um `=` depois)
-- Builtins: `sqrt(x)`, `time()`, `random(n)`, `input()`
+```
+fn soma(a, b) { return a + b }                    // tipos inferidos (i64)
+fn media(a: double, b: double) -> double {         // tipos explícitos
+    return (a + b) / 2.0
+}
 
-## O que mudou em relação ao protótipo antigo (bugs corrigidos)
+fn main() {
+    var x = 10
+    var nome = "aresY"
+    var arr = array(5)
+    arr[0] = x
 
-- Tipo de cada valor agora é rastreado por tabela de símbolos de verdade,
-  não adivinhado por substring do nome do registrador.
-- `%` agora é operador de módulo nativo do parser (antes quebrava o parsing).
-- Funções podem retornar valor (`i64` ou `double`), não só `void`.
-- `return` dentro do `main` agora gera `ret i32` corretamente (o protótipo
-  antigo geraria um erro de tipo no LLVM aqui).
-- `arr[i]` como expressão solta (sem `=` depois) agora parseia — antes o
-  parser sempre exigia uma atribuição e quebrava com `SyntaxError`.
-- `true` / `false` agora são utilizáveis como literais — antes o token
-  existia no lexer mas o parser não sabia o que fazer com ele.
+    if x > 5 { print("grande") } else { print("pequeno") }
 
-## Limitações atuais (v1)
+    var i = 0
+    while i < 3 { print(i); i = i + 1 }
 
-- Parâmetros de função são sempre `i64` — passar float pra função ainda não
-  tem suporte (fica pro type-checker mais robusto, com genéricos).
-- Sem strings como valor (só literais em `print`).
-- Arrays não têm bounds checking nem `free`.
+    try {
+        if x == 0 { throw "x não pode ser zero" }
+    } catch e {
+        print("erro: " + e)
+    }
+
+    return 0
+}
+```
+
+- `var x = expr` — declaração; `x = expr` — reatribuição
+- `if cond { } else { }`, `while cond { }`, `return expr`
+- Aritmética `+ - * / %`, comparação `== != < > <= >=`, bitwise `& | ^`
+  (só com inteiros), unário `-`
+- `true` / `false`
+- Strings: concatenação com `+`, `==`/`!=` por conteúdo, `len(s)`,
+  `upper(s)`, `lower(s)`, `substr(s, i, tam)`, `char_at(s, i)`, `str(n)`
+- Arrays: `array(n)` (só `i64`, sem bounds checking, sem `free` — o GC
+  cuida da memória se estiver ligado)
+- `try { } catch e { }` / `throw expr` — exceções propagam pela pilha de
+  chamadas até o catch mais próximo; `e` dentro do catch é sempre `str`
+- `extern fn nome(tipos) -> tipo` + `import "libc_ou_nome_da_lib"` —
+  chama função de biblioteca C (tipos aceitos: `i64`, `f64`, `void`)
+- Builtins: `sqrt` `sin` `cos` `tan` `atan` `atan2` `log` `log10` `exp`
+  `pow` `floor` `ceil` `abs` `min` `max` `pi()` `time()` `sleep(s)`
+  `random(n)` `input()` `read_line()` `read_file(caminho)`
+  `write_file(caminho, txt)` `append_file(caminho, txt)`
+
+## Bibliotecas nativas em .ay (import de módulo)
+
+Além de `import "nome_da_lib_c"` (que vira `-lNOME` na hora de linkar),
+dá pra importar um arquivo `.ay` inteiro — as `fn` dele ficam disponíveis
+no programa que importou, tipo um `#include` simples:
+
+```
+import "stdlib/mathx.ay"     // caminho relativo ao arquivo que importa
+import geometria              // sem aspas: procura "geometria.ay" no
+                               // mesmo diretório
+
+fn main() {
+    print(quadrado(7))                        // de stdlib/mathx.ay
+    print(geometria.calcular_area_circulo(5.0)) // prefixo é opcional,
+                                                  // só documentação
+    return 0
+}
+```
+
+Regras: bibliotecas importadas não podem ter `main()`; um mesmo arquivo só
+é trazido uma vez mesmo se importado por caminhos diferentes do grafo de
+imports (evita duplicação e import circular). O projeto já vem com duas
+bibliotecas em `stdlib/`:
+
+- `stdlib/mathx.ay` — `quadrado`, `cubo`, `potencia`, `fatorial`,
+  `eh_primo`, `eh_par`/`eh_impar`, `mdc`, `mmc`, `clamp`, `media`
+- `stdlib/strings.ay` — `eh_vazia`, `repetir`, `inverter`,
+  `eh_palindromo`, `contem`
+
+Veja `exemplo_stdlib.ay` pra um exemplo completo usando as duas.
+
+## Coletor de lixo (GC)
+
+Por padrão, `array(n)`, strings novas (concatenação, `substr` etc.) e
+strings lidas de arquivo/teclado são alocadas com o Boehm GC (`GC_malloc`),
+que varre e libera memória automaticamente — sem isso, um programa de vida
+longa que aloca em loop vazaria memória sem parar (o protótipo original
+usava só `malloc` puro e nunca liberava nada).
+
+- Precisa da `libgc` instalada (`pkg install libgc`) e do `-lgc` na hora
+  de linkar — o `aresy` já faz isso sozinho.
+- Se não quiser depender da libgc, use `--no-gc` em qualquer comando
+  (`aresy --no-gc programa.ay`, `aresy build --no-gc ...`) — aí volta a
+  usar `malloc` puro, sem coleta (cuidado com loops muito longos).
+
+## Bugs corrigidos nesta versão
+
+- **Notação científica em float** (`0.0000001`, `1e-7`) — literais double
+  agora são emitidos como hex IEEE-754 (`0x...`) pro LLVM, formato que não
+  depende de como o Python formata o número por baixo dos panos.
+- **`==`/`!=` entre strings fora de `if`** — o resultado da comparação
+  (`icmp`, tipo `i1` no LLVM) estava rotulado internamente como `i64`, o
+  que gerava IR inválido sempre que o resultado era usado em outro lugar
+  além da condição de um `if`/`while` (ex.: `print(a == b)` ou
+  `return a == b` quebravam a compilação). Mesmo problema existia pra
+  comparação de números (`print(3 > 2)`) e pra aritmética/bitwise
+  misturando número com comparação (`1 + (3 > 2)`). Corrigido normalizando
+  esses valores pra `i64` nos pontos onde são consumidos.
+- **`import geometria` / `modulo.funcao(...)`** — a sintaxe já existia nos
+  exemplos do projeto (`main.ay`/`geometria.ay`) mas não compilava: faltava
+  o `.` no lexer e o parser não entendia chamada qualificada por módulo.
+
+## Limitações atuais
+
+- Parâmetros de função aceitam `i64`/`double`/`str`, mas ponteiro de
+  função como argumento (callback) assume sempre `i64` — sem checagem de
+  tipo real entre o que foi passado e como é chamado.
+- Arrays não têm bounds checking; só guardam `i64`.
 - Sem structs/tipos compostos ainda.
+- Sem interpolação/f-strings — concatenação com `+` cobre o caso básico.
+- `import "arquivo.ay"` não tem namespace de verdade: tudo que a
+  biblioteca declara no topo do arquivo entra no escopo global de quem
+  importou (sem exportação seletiva, sem `as apelido`).

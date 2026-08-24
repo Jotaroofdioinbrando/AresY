@@ -1,0 +1,10 @@
+fn transformar(s) {
+    return s
+}
+
+fn main() {
+    var nome = "AresY"
+    var x = transformar(nome)
+    print(x)
+    return 0
+}

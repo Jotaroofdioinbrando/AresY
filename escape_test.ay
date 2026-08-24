@@ -1,0 +1,4 @@
+fn main() {
+    print("A\\B")
+    return 0
+}

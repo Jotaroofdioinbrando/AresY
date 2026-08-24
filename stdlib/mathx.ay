@@ -1,0 +1,87 @@
+// stdlib/mathx.ay — funções matemáticas auxiliares pra aresY.
+//
+// Como importar:
+//   import "stdlib/mathx.ay"        (caminho relativo ao arquivo que faz
+//                                     o import, não à pasta onde você
+//                                     roda o "aresy")
+// As funções ficam disponíveis direto, sem prefixo — ex.: quadrado(5).
+
+fn quadrado(x: i64) -> i64 {
+    return x * x
+}
+
+fn cubo(x: i64) -> i64 {
+    return x * x * x
+}
+
+fn potencia(base: i64, expoente: i64) -> i64 {
+    var resultado = 1
+    var i = 0
+    while i < expoente {
+        resultado = resultado * base
+        i = i + 1
+    }
+    return resultado
+}
+
+fn eh_par(n: i64) -> i64 {
+    return n % 2 == 0
+}
+
+fn eh_impar(n: i64) -> i64 {
+    return n % 2 != 0
+}
+
+fn fatorial(n: i64) -> i64 {
+    var resultado = 1
+    var i = 2
+    while i <= n {
+        resultado = resultado * i
+        i = i + 1
+    }
+    return resultado
+}
+
+fn eh_primo(n: i64) -> i64 {
+    if n < 2 {
+        return 0
+    }
+    var i = 2
+    while i * i <= n {
+        if n % i == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn mdc(a: i64, b: i64) -> i64 {
+    var x = a
+    var y = b
+    var t = 0
+    while y != 0 {
+        t = y
+        y = x % y
+        x = t
+    }
+    return x
+}
+
+fn mmc(a: i64, b: i64) -> i64 {
+    return (a * b) / mdc(a, b)
+}
+
+fn clamp(valor: i64, minimo: i64, maximo: i64) -> i64 {
+    if valor < minimo {
+        return minimo
+    }
+    if valor > maximo {
+        return maximo
+    }
+    return valor
+}
+
+fn media(a: double, b: double) -> double {
+    return (a + b) / 2.0
+}

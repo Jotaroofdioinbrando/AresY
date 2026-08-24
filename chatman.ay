@@ -1,0 +1,13 @@
+fn dobro(n) {
+return n * 2
+}
+
+fn main() {
+var x = 10
+var y = dobro(x)
+if y > 15 {
+print("Passou de 15!")
+} else {
+print("15 ou menos")
+}
+}

@@ -1,0 +1,15 @@
+fn transformar(s: str) {
+    return upper(s)
+}
+
+fn main() {
+    var nome = "AresY"
+    var x = transformar(nome)
+
+    print(x)
+    print(len(x))
+    print(substr(x, 1, 3))
+    print(char_at(x, 0))
+
+    return 0
+}

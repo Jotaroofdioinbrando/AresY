@@ -1,0 +1,22 @@
+fn main() {
+    print("=== TESTE DE ESTRESSE DO GARBAGE COLLECTOR ===")
+    
+    var i = 0
+    var limite = 10000000
+    var inicio = time()
+
+    while i < limite {
+        // Aloca array e string temporários que precisam ser coletados pelo GC
+        var temp_arr = array(100)
+        var temp_str = "AresY_GC_Test_" + str(i)
+        
+        i = i + 1
+    }
+
+    var fim = time()
+    print("10 Milhões de alocações temporárias concluídas sem estourar a RAM!")
+    print("Tempo total:")
+    print(fim - inicio)
+    
+    return 0
+}
