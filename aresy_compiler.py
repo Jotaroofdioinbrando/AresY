@@ -943,9 +943,26 @@ class CodeGen:
     def gen_stmt(self, node, env, lines, func_ret_type):
         if isinstance(node, VarDecl):
             t, v = self.gen_expr(node.expr, env, lines)
-            env[node.name] = t
             lt = self.llvm_type(t)
-            lines.append(f"  %{node.name} = alloca {lt}, align 8")
+            if node.name in env:
+                # já existe um alloca com esse nome nesta função (duas
+                # declarações do mesmo nome em ramos irmãos de if/try/while,
+                # por exemplo) — reaproveita o registrador em vez de gerar
+                # "%nome = alloca" de novo, que o LLVM rejeita como
+                # "multiple definition of local value".
+                old_t = env[node.name]
+                if (old_t == "str") != (t == "str"):
+                    raise CompileError(
+                        f"'{node.name}' já foi declarada como {old_t} nesta função — "
+                        "não dá pra redeclarar com um tipo incompatível (str vs número)"
+                    )
+                if old_t != t:
+                    v = self.cast(lines, t, v, old_t)
+                t = old_t
+                lt = self.llvm_type(t)
+            else:
+                lines.append(f"  %{node.name} = alloca {lt}, align 8")
+            env[node.name] = t
             lines.append(f"  store {lt} {v}, {lt}* %{node.name}, align 8")
 
         elif isinstance(node, Assign):
@@ -1041,7 +1058,18 @@ class CodeGen:
             # zera a flag (a exceção foi capturada aqui) e expõe a mensagem
             # na variável declarada em "catch <nome>" (sempre tipo str).
             lines.append("  store i32 0, i32* @__ares_exc_flag")
-            lines.append(f"  %{node.catch_var} = alloca i8*, align 8")
+            if node.catch_var in env:
+                # nome já usado nesta função (outro "catch" com o mesmo nome,
+                # ou um parâmetro/var). Se não for str, não dá pra reaproveitar
+                # o registrador com segurança — erro claro em vez de IR
+                # corrompido; se já for str (outro catch anterior), reusa.
+                if env[node.catch_var] != "str":
+                    raise CompileError(
+                        f"'{node.catch_var}' já existe nesta função com outro tipo — "
+                        "a variável de 'catch' é sempre str, escolhe outro nome"
+                    )
+            else:
+                lines.append(f"  %{node.catch_var} = alloca i8*, align 8")
             lines.append(f"  %excmsg_{uid} = load i8*, i8** @__ares_exc_msg")
             lines.append(f"  store i8* %excmsg_{uid}, i8** %{node.catch_var}, align 8")
             env[node.catch_var] = "str"
@@ -1681,6 +1709,8 @@ def compile_ir_to_binary(clang_path, ir_source, out_path, target_triple=None,
         if use_gc:
             cmd.append("-lgc")
         for lib in (extra_libs or []):
+            if lib == "m":
+                continue  # -lm já foi adicionado acima
             cmd.append(f"-l{lib}")
         cmd += ["-o", out_path]
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -2025,7 +2055,7 @@ def _build_native(argv):
         sys.exit(1)
     with open(out_path, "w") as f:
         f.write(ir)
-    extra_libs = "".join(f" -l{lib}" for lib in imports)
+    extra_libs = "".join(f" -l{lib}" for lib in imports if lib != "m")
     gc_flag = " -lgc" if use_gc else ""
     print(f"IR gerado em {out_path}. Compile com:\n  clang -O3 -ffast-math {out_path} -lm{gc_flag}{extra_libs} -o programa")
     if use_gc:

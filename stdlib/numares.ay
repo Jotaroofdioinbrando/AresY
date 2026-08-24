@@ -270,3 +270,302 @@ fn print_array(arr: i64) {
     s = s + "]"
     print(s)
 }
+
+// --- Novas Funcionalidades (numAres Avançado) ---
+
+fn mean(arr: i64) -> double {
+    var n = arr[0]
+    if n == 0 {
+        throw "mean: array vazio"
+    }
+    var s = sum(arr)
+    var s_double = s * 1.0
+    var n_double = n * 1.0
+    return s_double / n_double
+}
+
+fn variance(arr: i64) -> double {
+    var n = arr[0]
+    if n == 0 {
+        throw "variance: array vazio"
+    }
+    var m = mean(arr)
+    var sum_sq_diff = 0.0
+    var i = 1
+    while i <= n {
+        var diff = (arr[i] * 1.0) - m
+        sum_sq_diff = sum_sq_diff + (diff * diff)
+        i = i + 1
+    }
+    var n_double = n * 1.0
+    return sum_sq_diff / n_double
+}
+
+fn std(arr: i64) -> double {
+    var v = variance(arr)
+    return sqrt(v)
+}
+
+fn prod(arr: i64) -> i64 {
+    var n = arr[0]
+    var p = 1
+    var i = 1
+    while i <= n {
+        p = p * arr[i]
+        i = i + 1
+    }
+    return p
+}
+
+fn cumsum(arr: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var s = 0
+    var i = 1
+    while i <= n {
+        s = s + arr[i]
+        res[i] = s
+        i = i + 1
+    }
+    return res
+}
+
+fn cumprod(arr: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var p = 1
+    var i = 1
+    while i <= n {
+        p = p * arr[i]
+        res[i] = p
+        i = i + 1
+    }
+    return res
+}
+
+fn argmax(arr: i64) -> i64 {
+    var n = arr[0]
+    if n == 0 {
+        throw "argmax: array vazio"
+    }
+    var max_val = arr[1]
+    var max_idx = 0
+    var i = 2
+    while i <= n {
+        if arr[i] > max_val {
+            max_val = arr[i]
+            max_idx = i - 1
+        }
+        i = i + 1
+    }
+    return max_idx
+}
+
+fn argmin(arr: i64) -> i64 {
+    var n = arr[0]
+    if n == 0 {
+        throw "argmin: array vazio"
+    }
+    var min_val = arr[1]
+    var min_idx = 0
+    var i = 2
+    while i <= n {
+        if arr[i] < min_val {
+            min_val = arr[i]
+            min_idx = i - 1
+        }
+        i = i + 1
+    }
+    return min_idx
+}
+
+fn sort(arr: i64) -> i64 {
+    var n = arr[0]
+    var res = copy(arr)
+    var i = 2
+    while i <= n {
+        var key = res[i]
+        var j = i - 1
+        var insert_pos = i
+        var keep_going = 1
+        while j >= 1 {
+            if keep_going == 1 {
+                if res[j] > key {
+                    res[j + 1] = res[j]
+                    insert_pos = j
+                    j = j - 1
+                } else {
+                    keep_going = 0
+                }
+            } else {
+                j = 0
+            }
+        }
+        res[insert_pos] = key
+        i = i + 1
+    }
+    return res
+}
+
+fn argsort(arr: i64) -> i64 {
+    var n = arr[0]
+    var idx = array(n + 1)
+    idx[0] = n
+    var i = 1
+    while i <= n {
+        idx[i] = i - 1
+        i = i + 1
+    }
+    
+    i = 2
+    while i <= n {
+        var key_idx = idx[i]
+        var key_val = arr[key_idx + 1]
+        var j = i - 1
+        var insert_pos = i
+        var keep_going = 1
+        while j >= 1 {
+            if keep_going == 1 {
+                var current_idx = idx[j]
+                if arr[current_idx + 1] > key_val {
+                    idx[j + 1] = idx[j]
+                    insert_pos = j
+                    j = j - 1
+                } else {
+                    keep_going = 0
+                }
+            } else {
+                j = 0
+            }
+        }
+        idx[insert_pos] = key_idx
+        i = i + 1
+    }
+    return idx
+}
+
+fn concat(arr1: i64, arr2: i64) -> i64 {
+    var n1 = arr1[0]
+    var n2 = arr2[0]
+    var total = n1 + n2
+    var res = array(total + 1)
+    res[0] = total
+    var i = 1
+    while i <= n1 {
+        res[i] = arr1[i]
+        i = i + 1
+    }
+    var j = 1
+    while j <= n2 {
+        res[n1 + j] = arr2[j]
+        j = j + 1
+    }
+    return res
+}
+
+fn repeat(arr: i64, reps: i64) -> i64 {
+    if reps < 0 {
+        throw "repeat: reps nao pode ser negativo"
+    }
+    var n = arr[0]
+    var total = n * reps
+    var res = array(total + 1)
+    res[0] = total
+    var i = 1
+    var idx = 1
+    while i <= n {
+        var r = 0
+        while r < reps {
+            res[idx] = arr[i]
+            idx = idx + 1
+            r = r + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn tile(arr: i64, reps: i64) -> i64 {
+    if reps < 0 {
+        throw "tile: reps nao pode ser negativo"
+    }
+    var n = arr[0]
+    var total = n * reps
+    var res = array(total + 1)
+    res[0] = total
+    var r = 0
+    var idx = 1
+    while r < reps {
+        var i = 1
+        while i <= n {
+            res[idx] = arr[i]
+            idx = idx + 1
+            i = i + 1
+        }
+        r = r + 1
+    }
+    return res
+}
+
+fn all(arr: i64) -> i64 {
+    var n = arr[0]
+    var i = 1
+    while i <= n {
+        if arr[i] == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn any(arr: i64) -> i64 {
+    var n = arr[0]
+    var i = 1
+    while i <= n {
+        if arr[i] != 0 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn count_nonzero(arr: i64) -> i64 {
+    var n = arr[0]
+    var count = 0
+    var i = 1
+    while i <= n {
+        if arr[i] != 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+fn where(cond_arr: i64, true_arr: i64, false_arr: i64) -> i64 {
+    var n = cond_arr[0]
+    var n_true = true_arr[0]
+    var n_false = false_arr[0]
+    if n != n_true {
+        throw "where: cond_arr e true_arr com tamanhos diferentes"
+    }
+    if n != n_false {
+        throw "where: cond_arr e false_arr com tamanhos diferentes"
+    }
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    while i <= n {
+        if cond_arr[i] != 0 {
+            res[i] = true_arr[i]
+        } else {
+            res[i] = false_arr[i]
+        }
+        i = i + 1
+    }
+    return res
+}
