@@ -43,3 +43,8 @@ fable_dev.py
 # Python
 *.py
 !aresy_compiler.py
+
+# Ia
+*.fableinclude
+*.json
+*.txt
