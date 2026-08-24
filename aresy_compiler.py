@@ -45,7 +45,7 @@ import math as _pymath
 TOKEN_SPEC = [
     ("FLOAT",    r"\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+"),
     ("INT",      r"\d+"),
-    ("STRING",   r'"[^"]*"'),
+    ("STRING",   r'"(?:\\.|[^"\\])*"'),
     ("ID",       r"[A-Za-z_][A-Za-z0-9_]*"),
     ("COMMENT",  r"//.*"),
     ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~:]"),
@@ -113,7 +113,9 @@ def tokenize(code):
 class Num:
     def __init__(self, value, is_float): self.value, self.is_float = value, is_float
 class Str:
-    def __init__(self, value): self.value = value[1:-1]
+    def __init__(self, value):
+        raw = value[1:-1]
+        self.value = bytes(raw, "utf-8").decode("unicode_escape")
 class Bool:
     def __init__(self, value): self.value = value
 class Var:
@@ -482,6 +484,27 @@ def fmt_double_literal(v):
     return f"0x{bits:016X}"
 
 
+def llvm_escape_string(text):
+    """Escapa bytes de uma string para literal de string do LLVM IR."""
+    out = []
+    for b in text.encode("utf-8"):
+        if b == 0x5C:       # backslash
+            out.append(r"\5C")
+        elif b == 0x22:     # aspas
+            out.append(r"\22")
+        elif b == 0x0A:     # newline
+            out.append(r"\0A")
+        elif b == 0x0D:     # carriage return
+            out.append(r"\0D")
+        elif b == 0x09:     # tab
+            out.append(r"\09")
+        elif 0x20 <= b <= 0x7E:
+            out.append(chr(b))
+        else:
+            out.append(f"\\{b:02X}")
+    return "".join(out)
+
+
 class CodeGen:
     def __init__(self, target_triple=None, use_gc=True):
         self.target_triple = target_triple
@@ -724,9 +747,11 @@ class CodeGen:
             if isinstance(node.expr, Str):
                 uid = self.new_id()
                 text = node.expr.value
-                byte_len = len(text.encode("utf-8")) + 2
+                raw_len = len(text.encode("utf-8"))
+                escaped = llvm_escape_string(text)
+                byte_len = raw_len + 2
                 self.strings.append(
-                    f'@.str.{uid} = private unnamed_addr constant [{byte_len} x i8] c"{text}\\0A\\00"'
+                    f'@.str.{uid} = private unnamed_addr constant [{byte_len} x i8] c"{escaped}\\0A\\00"'
                 )
                 lines.append(f"  %pf_{uid} = getelementptr [{byte_len} x i8], [{byte_len} x i8]* @.str.{uid}, i32 0, i32 0")
                 lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid})")
@@ -839,9 +864,11 @@ class CodeGen:
 
         if isinstance(node, Str):
             text = node.value
-            byte_len = len(text.encode("utf-8")) + 1
+            raw_len = len(text.encode("utf-8"))
+            escaped = llvm_escape_string(text)
+            byte_len = raw_len + 1
             self.strings.append(
-                f'@.str.{uid} = private unnamed_addr constant [{byte_len} x i8] c"{text}\\00"'
+                f'@.str.{uid} = private unnamed_addr constant [{byte_len} x i8] c"{escaped}\\00"'
             )
             lines.append(f"  %sp_{uid} = getelementptr [{byte_len} x i8], [{byte_len} x i8]* @.str.{uid}, i32 0, i32 0")
             return "str", f"%sp_{uid}"
