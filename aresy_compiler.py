@@ -35,18 +35,19 @@ Diferenças em relação ao protótipo antigo (corrigidas):
 
 import sys
 import re
+import struct
 
 # ---------------------------------------------------------------------------
 # 1. LEXER
 # ---------------------------------------------------------------------------
 
 TOKEN_SPEC = [
-    ("FLOAT",    r"\d+\.\d+"),
+    ("FLOAT",    r"\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+"),
     ("INT",      r"\d+"),
     ("STRING",   r'"[^"]*"'),
     ("ID",       r"[A-Za-z_][A-Za-z0-9_]*"),
     ("COMMENT",  r"//.*"),
-    ("OP",       r"==|!=|<=|>=|[+\-*/%=<>(){}\[\],]"),
+    ("OP",       r"==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~]"),
     ("NEWLINE",  r"\n"),
     ("SKIP",     r"[ \t]+"),
 ]
@@ -63,13 +64,23 @@ class Token:
 
 def tokenize(code):
     tokens = []
+    pos = 0
     for m in MASTER_RE.finditer(code):
+        if m.start() != pos:
+            bad = code[pos:m.start()]
+            line = code.count("\n", 0, pos) + 1
+            raise SyntaxError(f"Caractere não reconhecido {bad!r} na linha {line}")
+        pos = m.end()
         kind, value = m.lastgroup, m.group()
         if kind in ("SKIP", "COMMENT", "NEWLINE"):
             continue
         if kind == "ID" and value in KEYWORDS:
             kind = value.upper()
         tokens.append(Token(kind, value))
+    if pos != len(code):
+        bad = code[pos:]
+        line = code.count("\n", 0, pos) + 1
+        raise SyntaxError(f"Caractere não reconhecido {bad!r} na linha {line}")
     tokens.append(Token("EOF", None))
     return tokens
 
@@ -213,8 +224,15 @@ class Parser:
     def parse_expr(self): return self.parse_comparison()
 
     def parse_comparison(self):
-        left = self.parse_add_sub()
+        left = self.parse_bitwise()
         while self.peek().value in ("==", "!=", "<", ">", "<=", ">="):
+            op = self.advance().value
+            left = BinOp(op, left, self.parse_bitwise())
+        return left
+
+    def parse_bitwise(self):
+        left = self.parse_add_sub()
+        while self.peek().value in ("&", "|", "^"):
             op = self.advance().value
             left = BinOp(op, left, self.parse_add_sub())
         return left
@@ -287,15 +305,29 @@ BUILTIN_DECLARES = (
     'declare i8* @malloc(i64)\n'
     'declare i32 @rand()\n'
     'declare void @srand(i32)\n'
+    'declare i64 @strlen(i8*)\n'
+    'declare i8* @strcpy(i8*, i8*)\n'
+    'declare i8* @strcat(i8*, i8*)\n'
 )
 FMT_CONSTANTS = (
     '@fmt_int = private unnamed_addr constant [5 x i8] c"%ld\\0A\\00"\n'
     '@fmt_float = private unnamed_addr constant [4 x i8] c"%f\\0A\\00"\n'
+    '@fmt_str = private unnamed_addr constant [4 x i8] c"%s\\0A\\00"\n'
     '@fmt_scan = private unnamed_addr constant [4 x i8] c"%ld\\00"\n'
 )
 
 class CompileError(Exception):
     pass
+
+
+def fmt_double_literal(v):
+    # LLVM IR exige que literais double tenham ponto decimal na mantissa
+    # (ex.: "1e-07" é sintaxe inválida, mas "1.0e-07" seria válida). Pra
+    # não depender da formatação "esperta" do Python (que varia conforme
+    # a magnitude do número), sempre emitimos o literal como hex IEEE-754,
+    # que o LLVM aceita sem ambiguidade em qualquer caso.
+    bits = struct.unpack("<Q", struct.pack("<d", float(v)))[0]
+    return f"0x{bits:016X}"
 
 
 class CodeGen:
@@ -308,6 +340,11 @@ class CodeGen:
     def new_id(self):
         self.counter += 1
         return self.counter
+
+    def llvm_type(self, t):
+        # "str" é rastreado internamente como tipo próprio, mas em LLVM
+        # é sempre um ponteiro i8* (C string terminada em \0).
+        return "i8*" if t == "str" else t
 
     # --- pré-varredura: adivinha o tipo de retorno de cada função pro header ---
     def _scan_return_type(self, body):
@@ -413,16 +450,23 @@ class CodeGen:
         if isinstance(node, VarDecl):
             t, v = self.gen_expr(node.expr, env, lines)
             env[node.name] = t
-            lines.append(f"  %{node.name} = alloca {t}, align 8")
-            lines.append(f"  store {t} {v}, {t}* %{node.name}, align 8")
+            lt = self.llvm_type(t)
+            lines.append(f"  %{node.name} = alloca {lt}, align 8")
+            lines.append(f"  store {lt} {v}, {lt}* %{node.name}, align 8")
 
         elif isinstance(node, Assign):
             if node.name not in env:
                 raise CompileError(f"Variável '{node.name}' não declarada — use 'var {node.name} = ...' primeiro")
             target_t = env[node.name]
             t, v = self.gen_expr(node.expr, env, lines)
+            if (target_t == "str") != (t == "str"):
+                raise CompileError(
+                    f"Tipo incompatível ao atribuir a '{node.name}' (era {target_t}, veio {t}) — "
+                    "strings e números não se misturam automaticamente"
+                )
             v = self.cast(lines, t, v, target_t)
-            lines.append(f"  store {target_t} {v}, {target_t}* %{node.name}, align 8")
+            lt = self.llvm_type(target_t)
+            lines.append(f"  store {lt} {v}, {lt}* %{node.name}, align 8")
 
         elif isinstance(node, IndexSet):
             _, iv = self.gen_expr(node.idx, env, lines)
@@ -449,9 +493,13 @@ class CodeGen:
                 uid = self.new_id()
                 if t == "double":
                     lines.append(f"  %pf_{uid} = getelementptr [4 x i8], [4 x i8]* @fmt_float, i32 0, i32 0")
+                    lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, {t} {v})")
+                elif t == "str":
+                    lines.append(f"  %pf_{uid} = getelementptr [4 x i8], [4 x i8]* @fmt_str, i32 0, i32 0")
+                    lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, i8* {v})")
                 else:
                     lines.append(f"  %pf_{uid} = getelementptr [5 x i8], [5 x i8]* @fmt_int, i32 0, i32 0")
-                lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, {t} {v})")
+                    lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, {t} {v})")
 
         elif isinstance(node, If):
             uid = self.new_id()
@@ -481,6 +529,8 @@ class CodeGen:
                 lines.append("  ret void" if func_ret_type == "void" else f"  ret {func_ret_type} 0")
             else:
                 t, v = self.gen_expr(node.expr, env, lines)
+                if t == "str":
+                    raise CompileError("Retornar uma string de uma função ainda não é suportado")
                 v = self.cast(lines, t, v, func_ret_type)
                 lines.append(f"  ret {func_ret_type} {v}")
             uid = self.new_id()
@@ -496,7 +546,16 @@ class CodeGen:
         uid = self.new_id()
 
         if isinstance(node, Num):
-            return ("double", f"{float(node.value)}") if node.is_float else ("i64", str(int(node.value)))
+            return ("double", fmt_double_literal(node.value)) if node.is_float else ("i64", str(int(node.value)))
+
+        if isinstance(node, Str):
+            text = node.value
+            byte_len = len(text.encode("utf-8")) + 1
+            self.strings.append(
+                f'@.str.{uid} = private unnamed_addr constant [{byte_len} x i8] c"{text}\\00"'
+            )
+            lines.append(f"  %sp_{uid} = getelementptr [{byte_len} x i8], [{byte_len} x i8]* @.str.{uid}, i32 0, i32 0")
+            return "str", f"%sp_{uid}"
 
         if isinstance(node, Bool):
             return ("i64", "1" if node.value else "0")
@@ -505,7 +564,8 @@ class CodeGen:
             if node.name not in env:
                 raise CompileError(f"Variável '{node.name}' usada antes de declarar")
             t = env[node.name]
-            lines.append(f"  %reg_{uid} = load {t}, {t}* %{node.name}, align 8")
+            lt = self.llvm_type(t)
+            lines.append(f"  %reg_{uid} = load {lt}, {lt}* %{node.name}, align 8")
             return t, f"%reg_{uid}"
 
         if isinstance(node, UnaryOp):
@@ -519,6 +579,24 @@ class CodeGen:
         if isinstance(node, BinOp):
             t1, v1 = self.gen_expr(node.left, env, lines)
             t2, v2 = self.gen_expr(node.right, env, lines)
+
+            if t1 == "str" or t2 == "str":
+                if node.op != "+":
+                    raise CompileError(f"Operador '{node.op}' não é suportado para strings")
+                if t1 != "str" or t2 != "str":
+                    raise CompileError(
+                        "Concatenação de string exige que os dois operandos sejam strings "
+                        "(ainda não existe conversão automática número -> string)"
+                    )
+                lines.append(f"  %l1_{uid} = call i64 @strlen(i8* {v1})")
+                lines.append(f"  %l2_{uid} = call i64 @strlen(i8* {v2})")
+                lines.append(f"  %lt_{uid} = add nsw i64 %l1_{uid}, %l2_{uid}")
+                lines.append(f"  %la_{uid} = add nsw i64 %lt_{uid}, 1")
+                lines.append(f"  %buf_{uid} = call i8* @malloc(i64 %la_{uid})")
+                lines.append(f"  call i8* @strcpy(i8* %buf_{uid}, i8* {v1})")
+                lines.append(f"  call i8* @strcat(i8* %buf_{uid}, i8* {v2})")
+                return "str", f"%buf_{uid}"
+
             is_float = t1 == "double" or t2 == "double"
             if is_float:
                 v1 = self.cast(lines, t1, v1, "double")
@@ -532,6 +610,13 @@ class CodeGen:
                     om = {"<": "slt", ">": "sgt", "==": "eq", "!=": "ne", "<=": "sle", ">=": "sge"}[node.op]
                     lines.append(f"  %cmp_{uid} = icmp {om} i64 {v1}, {v2}")
                 return "i1", f"%cmp_{uid}"
+
+            if node.op in ("&", "|", "^"):
+                if is_float:
+                    raise CompileError(f"Operador '{node.op}' (bitwise) não é suportado com float — use inteiros")
+                instr = {"&": "and", "|": "or", "^": "xor"}[node.op]
+                lines.append(f"  %tmp_{uid} = {instr} i64 {v1}, {v2}")
+                return "i64", f"%tmp_{uid}"
 
             if is_float:
                 instr = {"+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv"}.get(node.op)
@@ -612,6 +697,8 @@ class CodeGen:
         arg_strs = []
         for a in node.args:
             t, v = self.gen_expr(a, env, lines)
+            if t == "str":
+                raise CompileError(f"'{name}': funções definidas pelo usuário ainda não aceitam argumentos do tipo string")
             v = self.cast(lines, t, v, "i64")
             arg_strs.append(f"i64 {v}")
         ret_t = sig["ret"]
@@ -803,13 +890,12 @@ class ReplSession:
 
         with tempfile.TemporaryDirectory() as td:
             bin_path = os.path.join(td, "repl_bin")
-            # -O0 no REPL: o programa roda uma vez só e é minúsculo, então
-            # otimizar não ganha nada em runtime — só custa tempo de clang
-            # a cada Enter. "aresy build"/"aresy arquivo.ay" continuam em
-            # -O2 (compile_ir_to_binary usa -O2 por padrão), que é onde a
-            # otimização realmente importa (binário reaproveitado/rodado
-            # várias vezes ou por mais tempo).
-            compile_ir_to_binary(self.clang_path, ir, bin_path, self.target_triple, opt_level="-O0")
+            # -O2, igual ao modo arquivo: o custo extra de compilar com
+            # otimização é irrelevante (poucos ms) comparado ao ganho em
+            # blocos com loop pesado (ex.: um "while" de centenas de
+            # milhões de iterações), onde -O0 deixava a execução MUITO
+            # mais lenta que o binário do "aresy arquivo.ay" equivalente.
+            compile_ir_to_binary(self.clang_path, ir, bin_path, self.target_triple, opt_level="-O2")
             proc = subprocess.run([bin_path], capture_output=True, text=True)
 
         out = proc.stdout
