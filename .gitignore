@@ -34,3 +34,8 @@ teste_ay_saida.txt
 dados.txt
 fable_dev.py
 
+
+# Arquivos AresY
+*.ay
+!stdlib/
+!stdlib/*.ay

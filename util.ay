@@ -1,3 +1,0 @@
-fn gritar(s: str) -> str {
-    return upper(s)
-}

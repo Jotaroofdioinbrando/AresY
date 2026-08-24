@@ -1,6 +1,0 @@
-fn main() {
-    print("Digite seu nome:")
-    var nome = read_line()
-    print("oi " + nome)
-    return 0
-}

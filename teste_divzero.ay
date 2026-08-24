@@ -1,8 +1,0 @@
-fn main() {
-    var a = 10
-    var b = 0
-
-    print(a / b)
-
-    return 0
-}

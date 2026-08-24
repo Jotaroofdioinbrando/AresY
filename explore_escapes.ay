@@ -1,7 +1,0 @@
-fn main() {
-    print("A")
-    print("A\tB")
-    print("A\nB")
-    print("A\\B")
-    return 0
-}

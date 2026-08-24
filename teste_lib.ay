@@ -1,7 +1,0 @@
-import "stdlib/strings.ay"
-
-fn main() {
-    var nome = "aresy"
-    print(gritar(nome))
-    return 0
-}

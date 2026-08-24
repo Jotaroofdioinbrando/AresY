@@ -1,5 +1,0 @@
-import "stdlib/mathx.ay"
-
-fn main() {
-    print(sqrt(25.0))
-}

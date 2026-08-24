@@ -1,7 +1,0 @@
-import "util.ay"
-
-fn main() {
-    var msg = gritar("ola aresy")
-    print(msg)
-    return 0
-}
