@@ -183,14 +183,23 @@ class Parser:
             return Assign(name, self.parse_expr())
         if tok.kind == "ID" and self.peek(1).value == "[":
             name = self.advance().value
-            self.advance()  # [
-            idx = self.parse_expr()
-            self.expect("OP")  # ]
+            indices = []
+            while self.peek().value == "[":
+                self.advance()  # [
+                indices.append(self.parse_expr())
+                self.expect("OP")  # ]
+            base = Var(name)
             if self.peek().value == "=":
                 self.advance()  # =
                 expr = self.parse_expr()
-                return IndexSet(name, idx, expr)
-            return ExprStmt(IndexGet(name, idx))
+                target = base
+                for idx in indices[:-1]:
+                    target = IndexGet(target, idx)
+                return IndexSet(target, indices[-1], expr)
+            node = base
+            for idx in indices:
+                node = IndexGet(node, idx)
+            return ExprStmt(node)
         return ExprStmt(self.parse_expr())
 
     def parse_funcdef(self):
@@ -279,12 +288,13 @@ class Parser:
                     if self.peek().value == ",": self.advance()
                 self.expect("OP")
                 return Call(name, args)
-            if self.peek().value == "[":
+            node = Var(name)
+            while self.peek().value == "[":
                 self.advance()
                 idx = self.parse_expr()
                 self.expect("OP")
-                return IndexGet(name, idx)
-            return Var(name)
+                node = IndexGet(node, idx)
+            return node
         if tok.value == "(":
             self.advance()
             e = self.parse_expr()
@@ -472,9 +482,11 @@ class CodeGen:
             _, iv = self.gen_expr(node.idx, env, lines)
             t, v = self.gen_expr(node.expr, env, lines)
             v = self.cast(lines, t, v, "i64")
+            at, av = self.gen_expr(node.arr, env, lines)
+            if at != "i64":
+                raise CompileError("Indexação (escrita com []) só é suportada em arrays")
             uid = self.new_id()
-            lines.append(f"  %ai_{uid} = load i64, i64* %{node.arr}, align 8")
-            lines.append(f"  %ap_{uid} = inttoptr i64 %ai_{uid} to i64*")
+            lines.append(f"  %ap_{uid} = inttoptr i64 {av} to i64*")
             lines.append(f"  %ep_{uid} = getelementptr i64, i64* %ap_{uid}, i64 {iv}")
             lines.append(f"  store i64 {v}, i64* %ep_{uid}, align 8")
 
@@ -644,9 +656,11 @@ class CodeGen:
                 return "i64", f"%tmp_{uid}"
 
         if isinstance(node, IndexGet):
+            at, av = self.gen_expr(node.arr, env, lines)
+            if at != "i64":
+                raise CompileError("Indexação com [] só é suportada em arrays")
             _, iv = self.gen_expr(node.idx, env, lines)
-            lines.append(f"  %ai_{uid} = load i64, i64* %{node.arr}, align 8")
-            lines.append(f"  %ap_{uid} = inttoptr i64 %ai_{uid} to i64*")
+            lines.append(f"  %ap_{uid} = inttoptr i64 {av} to i64*")
             lines.append(f"  %ep_{uid} = getelementptr i64, i64* %ap_{uid}, i64 {iv}")
             lines.append(f"  %ev_{uid} = load i64, i64* %ep_{uid}, align 8")
             return "i64", f"%ev_{uid}"
