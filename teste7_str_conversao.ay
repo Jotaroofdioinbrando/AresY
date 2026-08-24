@@ -1,0 +1,6 @@
+fn main() {
+    var n = 42
+    var pi = 3.14
+    print("n=" + str(n) + " pi=" + str(pi))
+    return 0
+}

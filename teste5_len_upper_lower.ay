@@ -1,0 +1,7 @@
+fn main() {
+    var s = "Hello World"
+    print(len(s))
+    print(upper(s))
+    print(lower(s))
+    return 0
+}

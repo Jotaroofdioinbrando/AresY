@@ -1,0 +1,12 @@
+fn main() {
+    var a = "abc"
+    var b = "abc"
+    var c = "xyz"
+    if a == b {
+        print("iguais")
+    }
+    if a != c {
+        print("diferentes")
+    }
+    return 0
+}

@@ -1,0 +1,6 @@
+fn main() {
+    var s = "aresY compilador"
+    print(substr(s, 0, 5))
+    print(char_at(s, 6))
+    return 0
+}

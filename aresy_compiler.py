@@ -429,6 +429,18 @@ BUILTIN_DECLARES = (
     # --- Erros/exceções (try/catch/throw) ---
     'declare i32 @sprintf(i8*, i8*, ...)\n'
     'declare void @exit(i32)\n'
+    # --- Strings avançadas & I/O ---
+    'declare i32 @strcmp(i8*, i8*)\n'
+    'declare i8* @strncpy(i8*, i8*, i64)\n'
+    'declare i32 @toupper(i32)\n'
+    'declare i32 @tolower(i32)\n'
+    'declare i64 @read(i32, i8*, i64)\n'
+    'declare i8* @fopen(i8*, i8*)\n'
+    'declare i32 @fclose(i8*)\n'
+    'declare i32 @fseek(i8*, i64, i32)\n'
+    'declare i64 @ftell(i8*)\n'
+    'declare i64 @fread(i8*, i64, i64, i8*)\n'
+    'declare i64 @fwrite(i8*, i64, i64, i8*)\n'
 )
 FMT_CONSTANTS = (
     '@fmt_int = private unnamed_addr constant [5 x i8] c"%ld\\0A\\00"\n'
@@ -441,6 +453,10 @@ FMT_CONSTANTS = (
     '@fmt_float_raw = private unnamed_addr constant [3 x i8] c"%f\\00"\n'
     '@fmt_uncaught = private unnamed_addr constant [25 x i8] '
     'c"Excecao nao tratada: %s\\0A\\00"\n'
+    # modos de abertura de arquivo (fopen)
+    '@fmt_mode_r = private unnamed_addr constant [2 x i8] c"r\\00"\n'
+    '@fmt_mode_w = private unnamed_addr constant [2 x i8] c"w\\00"\n'
+    '@fmt_mode_a = private unnamed_addr constant [2 x i8] c"a\\00"\n'
 )
 # Estado global de exceção: uma flag (0/1) + a mensagem (sempre uma string).
 # É um mecanismo simples de propagação por "código de erro" — sem
@@ -868,13 +884,18 @@ class CodeGen:
             t2, v2 = self.gen_expr(node.right, env, lines)
 
             if t1 == "str" or t2 == "str":
-                if node.op != "+":
-                    raise CompileError(f"Operador '{node.op}' não é suportado para strings")
                 if t1 != "str" or t2 != "str":
                     raise CompileError(
-                        "Concatenação de string exige que os dois operandos sejam strings "
-                        "(ainda não existe conversão automática número -> string)"
+                        "Operações com string exigem que os dois operandos sejam strings "
+                        "(ainda não existe conversão automática número -> string; use str(x))"
                     )
+                if node.op in ("==", "!="):
+                    lines.append(f"  %scmp_{uid} = call i32 @strcmp(i8* {v1}, i8* {v2})")
+                    pred = "eq" if node.op == "==" else "ne"
+                    lines.append(f"  %cmp_{uid} = icmp {pred} i32 %scmp_{uid}, 0")
+                    return "i64", f"%cmp_{uid}"
+                if node.op != "+":
+                    raise CompileError(f"Operador '{node.op}' não é suportado para strings (só '+', '==' e '!=')")
                 lines.append(f"  %l1_{uid} = call i64 @strlen(i8* {v1})")
                 lines.append(f"  %l2_{uid} = call i64 @strlen(i8* {v2})")
                 lines.append(f"  %lt_{uid} = add nsw i64 %l1_{uid}, %l2_{uid}")
@@ -979,6 +1000,164 @@ class CodeGen:
             lines.append(f"  %rc_{uid} = sdiv i64 %r6_{uid}, 256")
             lines.append(f"  %rr_{uid} = srem i64 %rc_{uid}, {mv}")
             return "i64", f"%rr_{uid}"
+
+        # --- Strings avançadas ---
+
+        if name == "len":
+            t, sv = self.gen_expr(node.args[0], env, lines)
+            if t != "str":
+                raise CompileError("'len' espera uma string (pra tamanho de array, guarda o tamanho numa variável à parte)")
+            lines.append(f"  %ln_{uid} = call i64 @strlen(i8* {sv})")
+            return "i64", f"%ln_{uid}"
+
+        if name == "str":
+            t, v = self.gen_expr(node.args[0], env, lines)
+            return "str", self.to_str(lines, t, v)
+
+        if name in ("upper", "lower"):
+            t, sv = self.gen_expr(node.args[0], env, lines)
+            if t != "str":
+                raise CompileError(f"'{name}' espera uma string")
+            libc_fn = "toupper" if name == "upper" else "tolower"
+            lines.append(f"  %clen_{uid} = call i64 @strlen(i8* {sv})")
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            lines.append(f"  %clen1_{uid} = add nsw i64 %clen_{uid}, 1")
+            lines.append(f"  %cbuf_{uid} = call i8* {alloc_fn}(i64 %clen1_{uid})")
+            lines.append(f"  %cidx_{uid} = alloca i64, align 8")
+            lines.append(f"  store i64 0, i64* %cidx_{uid}, align 8")
+            lines.append(f"  br label %cc_{uid}")
+            lines.append(f"cc_{uid}:")
+            lines.append(f"  %ci_{uid} = load i64, i64* %cidx_{uid}, align 8")
+            lines.append(f"  %ccmp_{uid} = icmp slt i64 %ci_{uid}, %clen_{uid}")
+            lines.append(f"  br i1 %ccmp_{uid}, label %cb_{uid}, label %ce_{uid}")
+            lines.append(f"cb_{uid}:")
+            lines.append(f"  %csp_{uid} = getelementptr i8, i8* {sv}, i64 %ci_{uid}")
+            lines.append(f"  %cch_{uid} = load i8, i8* %csp_{uid}, align 1")
+            lines.append(f"  %cchi_{uid} = sext i8 %cch_{uid} to i32")
+            lines.append(f"  %ccv_{uid} = call i32 @{libc_fn}(i32 %cchi_{uid})")
+            lines.append(f"  %ccc_{uid} = trunc i32 %ccv_{uid} to i8")
+            lines.append(f"  %cdp_{uid} = getelementptr i8, i8* %cbuf_{uid}, i64 %ci_{uid}")
+            lines.append(f"  store i8 %ccc_{uid}, i8* %cdp_{uid}, align 1")
+            lines.append(f"  %ci2_{uid} = add nsw i64 %ci_{uid}, 1")
+            lines.append(f"  store i64 %ci2_{uid}, i64* %cidx_{uid}, align 8")
+            lines.append(f"  br label %cc_{uid}")
+            lines.append(f"ce_{uid}:")
+            lines.append(f"  %cep_{uid} = getelementptr i8, i8* %cbuf_{uid}, i64 %clen_{uid}")
+            lines.append(f"  store i8 0, i8* %cep_{uid}, align 1")
+            return "str", f"%cbuf_{uid}"
+
+        if name == "substr":
+            t0, sv = self.gen_expr(node.args[0], env, lines)
+            if t0 != "str":
+                raise CompileError("'substr' espera uma string como primeiro argumento")
+            t1, startv = self.gen_expr(node.args[1], env, lines)
+            startv = self.cast(lines, t1, startv, "i64")
+            t2, lenv = self.gen_expr(node.args[2], env, lines)
+            lenv = self.cast(lines, t2, lenv, "i64")
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            lines.append(f"  %sblen1_{uid} = add nsw i64 {lenv}, 1")
+            lines.append(f"  %sbbuf_{uid} = call i8* {alloc_fn}(i64 %sblen1_{uid})")
+            lines.append(f"  %sbsrc_{uid} = getelementptr i8, i8* {sv}, i64 {startv}")
+            lines.append(f"  call i8* @strncpy(i8* %sbbuf_{uid}, i8* %sbsrc_{uid}, i64 {lenv})")
+            lines.append(f"  %sbend_{uid} = getelementptr i8, i8* %sbbuf_{uid}, i64 {lenv}")
+            lines.append(f"  store i8 0, i8* %sbend_{uid}, align 1")
+            return "str", f"%sbbuf_{uid}"
+
+        if name == "char_at":
+            t0, sv = self.gen_expr(node.args[0], env, lines)
+            if t0 != "str":
+                raise CompileError("'char_at' espera uma string como primeiro argumento")
+            t1, idxv = self.gen_expr(node.args[1], env, lines)
+            idxv = self.cast(lines, t1, idxv, "i64")
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            lines.append(f"  %cabuf_{uid} = call i8* {alloc_fn}(i64 2)")
+            lines.append(f"  %casrc_{uid} = getelementptr i8, i8* {sv}, i64 {idxv}")
+            lines.append(f"  %cach_{uid} = load i8, i8* %casrc_{uid}, align 1")
+            lines.append(f"  store i8 %cach_{uid}, i8* %cabuf_{uid}, align 1")
+            lines.append(f"  %caend_{uid} = getelementptr i8, i8* %cabuf_{uid}, i64 1")
+            lines.append(f"  store i8 0, i8* %caend_{uid}, align 1")
+            return "str", f"%cabuf_{uid}"
+
+        # --- I/O avançado ---
+
+        if name == "read_line":
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            lines.append(f"  %rlbuf_{uid} = call i8* {alloc_fn}(i64 1024)")
+            lines.append(f"  %rln_{uid} = call i64 @read(i32 0, i8* %rlbuf_{uid}, i64 1023)")
+            lines.append(f"  %rlneg_{uid} = icmp slt i64 %rln_{uid}, 0")
+            lines.append(f"  %rln2_{uid} = select i1 %rlneg_{uid}, i64 0, i64 %rln_{uid}")
+            lines.append(f"  %rlendp_{uid} = getelementptr i8, i8* %rlbuf_{uid}, i64 %rln2_{uid}")
+            lines.append(f"  store i8 0, i8* %rlendp_{uid}, align 1")
+            lines.append(f"  %rlhas_{uid} = icmp sgt i64 %rln2_{uid}, 0")
+            lines.append(f"  br i1 %rlhas_{uid}, label %rlchk_{uid}, label %rlskip_{uid}")
+            lines.append(f"rlchk_{uid}:")
+            lines.append(f"  %rllast_{uid} = sub nsw i64 %rln2_{uid}, 1")
+            lines.append(f"  %rllastp_{uid} = getelementptr i8, i8* %rlbuf_{uid}, i64 %rllast_{uid}")
+            lines.append(f"  %rllastc_{uid} = load i8, i8* %rllastp_{uid}, align 1")
+            lines.append(f"  %rlisnl_{uid} = icmp eq i8 %rllastc_{uid}, 10")
+            lines.append(f"  br i1 %rlisnl_{uid}, label %rlstrip_{uid}, label %rlskip_{uid}")
+            lines.append(f"rlstrip_{uid}:")
+            lines.append(f"  store i8 0, i8* %rllastp_{uid}, align 1")
+            lines.append(f"  br label %rlskip_{uid}")
+            lines.append(f"rlskip_{uid}:")
+            return "str", f"%rlbuf_{uid}"
+
+        if name == "read_file":
+            t, pv = self.gen_expr(node.args[0], env, lines)
+            if t != "str":
+                raise CompileError("'read_file' espera o caminho como string")
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            lines.append(f"  %rfres_{uid} = alloca i8*, align 8")
+            lines.append(f"  %rfmode_{uid} = getelementptr [2 x i8], [2 x i8]* @fmt_mode_r, i32 0, i32 0")
+            lines.append(f"  %rffp_{uid} = call i8* @fopen(i8* {pv}, i8* %rfmode_{uid})")
+            lines.append(f"  %rfnull_{uid} = icmp eq i8* %rffp_{uid}, null")
+            lines.append(f"  br i1 %rfnull_{uid}, label %rffail_{uid}, label %rfok_{uid}")
+            lines.append(f"rffail_{uid}:")
+            lines.append(f"  %rfempty_{uid} = call i8* {alloc_fn}(i64 1)")
+            lines.append(f"  store i8 0, i8* %rfempty_{uid}, align 1")
+            lines.append(f"  store i8* %rfempty_{uid}, i8** %rfres_{uid}, align 8")
+            lines.append(f"  br label %rfdone_{uid}")
+            lines.append(f"rfok_{uid}:")
+            lines.append(f"  call i32 @fseek(i8* %rffp_{uid}, i64 0, i32 2)")
+            lines.append(f"  %rfsz_{uid} = call i64 @ftell(i8* %rffp_{uid})")
+            lines.append(f"  call i32 @fseek(i8* %rffp_{uid}, i64 0, i32 0)")
+            lines.append(f"  %rfsz1_{uid} = add nsw i64 %rfsz_{uid}, 1")
+            lines.append(f"  %rfbuf_{uid} = call i8* {alloc_fn}(i64 %rfsz1_{uid})")
+            lines.append(f"  %rfnr_{uid} = call i64 @fread(i8* %rfbuf_{uid}, i64 1, i64 %rfsz_{uid}, i8* %rffp_{uid})")
+            lines.append(f"  %rfendp_{uid} = getelementptr i8, i8* %rfbuf_{uid}, i64 %rfnr_{uid}")
+            lines.append(f"  store i8 0, i8* %rfendp_{uid}, align 1")
+            lines.append(f"  call i32 @fclose(i8* %rffp_{uid})")
+            lines.append(f"  store i8* %rfbuf_{uid}, i8** %rfres_{uid}, align 8")
+            lines.append(f"  br label %rfdone_{uid}")
+            lines.append(f"rfdone_{uid}:")
+            lines.append(f"  %rfresult_{uid} = load i8*, i8** %rfres_{uid}, align 8")
+            return "str", f"%rfresult_{uid}"
+
+        if name in ("write_file", "append_file"):
+            t0, pv = self.gen_expr(node.args[0], env, lines)
+            if t0 != "str":
+                raise CompileError(f"'{name}' espera o caminho como string")
+            t1, cv = self.gen_expr(node.args[1], env, lines)
+            if t1 != "str":
+                raise CompileError(f"'{name}' espera o conteúdo como string")
+            mode_const = "@fmt_mode_a" if name == "append_file" else "@fmt_mode_w"
+            lines.append(f"  %wfres_{uid} = alloca i64, align 8")
+            lines.append(f"  %wfmode_{uid} = getelementptr [2 x i8], [2 x i8]* {mode_const}, i32 0, i32 0")
+            lines.append(f"  %wffp_{uid} = call i8* @fopen(i8* {pv}, i8* %wfmode_{uid})")
+            lines.append(f"  %wfnull_{uid} = icmp eq i8* %wffp_{uid}, null")
+            lines.append(f"  br i1 %wfnull_{uid}, label %wffail_{uid}, label %wfok_{uid}")
+            lines.append(f"wffail_{uid}:")
+            lines.append(f"  store i64 0, i64* %wfres_{uid}, align 8")
+            lines.append(f"  br label %wfdone_{uid}")
+            lines.append(f"wfok_{uid}:")
+            lines.append(f"  %wflen_{uid} = call i64 @strlen(i8* {cv})")
+            lines.append(f"  call i64 @fwrite(i8* {cv}, i64 1, i64 %wflen_{uid}, i8* %wffp_{uid})")
+            lines.append(f"  call i32 @fclose(i8* %wffp_{uid})")
+            lines.append(f"  store i64 1, i64* %wfres_{uid}, align 8")
+            lines.append(f"  br label %wfdone_{uid}")
+            lines.append(f"wfdone_{uid}:")
+            lines.append(f"  %wfresult_{uid} = load i64, i64* %wfres_{uid}, align 8")
+            return "i64", f"%wfresult_{uid}"
 
         SINGLE_ARG_MATH = {
             "sin": "sin", "cos": "cos", "tan": "tan", "atan": "atan",
