@@ -561,12 +561,26 @@ class CodeGen:
             return ("i64", "1" if node.value else "0")
 
         if isinstance(node, Var):
-            if node.name not in env:
-                raise CompileError(f"Variável '{node.name}' usada antes de declarar")
-            t = env[node.name]
-            lt = self.llvm_type(t)
-            lines.append(f"  %reg_{uid} = load {lt}, {lt}* %{node.name}, align 8")
-            return t, f"%reg_{uid}"
+            if node.name in env:
+                t = env[node.name]
+                lt = self.llvm_type(t)
+                lines.append(f"  %reg_{uid} = load {lt}, {lt}* %{node.name}, align 8")
+                return t, f"%reg_{uid}"
+            if node.name in self.functions:
+                # referência a uma função top-level usada como valor (callback).
+                # Convenção: só funções que retornam i64 podem virar ponteiro de
+                # função dessa forma (é o formato que a chamada indireta espera).
+                sig = self.functions[node.name]
+                if sig["ret"] != "i64":
+                    raise CompileError(
+                        f"'{node.name}' não pode ser usada como callback: "
+                        f"só funções que retornam número inteiro são suportadas como valor"
+                    )
+                params_ty = ", ".join(["i64"] * len(sig["params"]))
+                fnty = f"i64 ({params_ty})"
+                lines.append(f"  %fnp_{uid} = ptrtoint {fnty}* @{node.name} to i64")
+                return "i64", f"%fnp_{uid}"
+            raise CompileError(f"Variável '{node.name}' usada antes de declarar")
 
         if isinstance(node, UnaryOp):
             t, v = self.gen_expr(node.operand, env, lines)
@@ -688,6 +702,30 @@ class CodeGen:
             lines.append(f"  %rc_{uid} = sdiv i64 %r6_{uid}, 256")
             lines.append(f"  %rr_{uid} = srem i64 %rc_{uid}, {mv}")
             return "i64", f"%rr_{uid}"
+
+        if name in env:
+            # variável local (normalmente um parâmetro) guardando um ponteiro
+            # de função, ex.: fn executar(func, x, y) { return func(x, y) }.
+            # Convenção: assume retorno i64 e todos os parâmetros i64 — é o
+            # mesmo formato usado ao passar uma função como valor (ver Var
+            # em gen_expr). Não há checagem de tipo real entre o que foi
+            # passado e como é chamado aqui.
+            t = env[name]
+            if t != "i64":
+                raise CompileError(f"'{name}' não é uma função nem um ponteiro de função válido")
+            arg_strs = []
+            for a in node.args:
+                at, av = self.gen_expr(a, env, lines)
+                if at == "str":
+                    raise CompileError(f"'{name}': chamada indireta ainda não aceita argumentos do tipo string")
+                av = self.cast(lines, at, av, "i64")
+                arg_strs.append(f"i64 {av}")
+            params_ty = ", ".join(["i64"] * len(node.args))
+            fnty = f"i64 ({params_ty})"
+            lines.append(f"  %fpv_{uid} = load i64, i64* %{name}, align 8")
+            lines.append(f"  %fp_{uid} = inttoptr i64 %fpv_{uid} to {fnty}*")
+            lines.append(f"  %ind_{uid} = call {fnty} %fp_{uid}({', '.join(arg_strs)})")
+            return "i64", f"%ind_{uid}"
 
         if name not in self.functions:
             raise CompileError(f"Função '{name}' não existe")
