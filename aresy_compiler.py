@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -717,12 +717,18 @@ class CodeGen:
         walk(body)
         return found["type"]
 
-    def _guess_type(self, node):
+    def _guess_type(self, node, known=None):
         # heurística leve só pra declarar o cabeçalho da função no LLVM
         # quando NÃO há anotação explícita de retorno ('-> tipo'); o valor
         # real de retorno é convertido (cast) se necessário no codegen.
+        # 'known' é o mapa (nome -> tipo) das variáveis já hoistadas antes
+        # desta, na ordem em que aparecem no corpo — sem isso, uma expressão
+        # como "h1 * 0.4" não tinha como saber que 'h1' é double (o caso
+        # base de Var não existia, então caía sempre no default i64).
+        known = known or {}
         if isinstance(node, Num): return "double" if node.is_float else "i64"
         if isinstance(node, Str): return "str"
+        if isinstance(node, Var): return known.get(node.name, "i64")
         if isinstance(node, Call) and node.name in ("sqrt", "time"): return "double"
         if isinstance(node, Call) and node.name in ("upper", "lower", "substr", "char_at", "str",
                                                       "read_line", "read_file"):
@@ -733,8 +739,8 @@ class CodeGen:
             # "var x = minha_str_func(...)" era hoistado como i64 (chute
             # errado) e depois batia de frente com o tipo real no codegen.
             return self.functions[node.name].get("ret", "i64")
-        if isinstance(node, BinOp): return self._guess_type(node.left)
-        if isinstance(node, UnaryOp): return self._guess_type(node.operand)
+        if isinstance(node, BinOp): return self._guess_type(node.left, known)
+        if isinstance(node, UnaryOp): return self._guess_type(node.operand, known)
         return "i64"
 
     _STR_BUILTIN_FIRST_ARG = {"upper", "lower", "len", "substr", "char_at"}
@@ -859,7 +865,7 @@ class CodeGen:
         rejeita isso como "Instruction does not dominate all uses"."""
         for s in body:
             if isinstance(s, VarDecl):
-                t = self._guess_type(s.expr)
+                t = self._guess_type(s.expr, out)
                 if s.name in out:
                     if (out[s.name] == "str") != (t == "str"):
                         raise CompileError(
@@ -928,7 +934,7 @@ class CodeGen:
         # hoist: todo alloca de 'var'/'catch' do corpo inteiro nasce aqui,
         # logo no início da função — garante que sempre domine qualquer uso,
         # não importa em que ramo condicional a declaração de fato ocorra.
-        locals_types = {}
+        locals_types = dict(env)
         self._collect_locals(node.body, locals_types)
         for name, t in locals_types.items():
             if name in env:
@@ -1970,7 +1976,7 @@ class ReplSession:
         # hoist (mesmo motivo do gen_function): VarDecl não gera mais seu
         # próprio alloca, então as variáveis novas deste round precisam ser
         # pré-alocadas aqui antes de qualquer statement rodar.
-        locals_types = {}
+        locals_types = dict(env)
         self.codegen._collect_locals(new_stmts, locals_types)
         for name, t in locals_types.items():
             if name in env:
