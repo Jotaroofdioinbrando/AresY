@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "1.0.0"
+VERSION = "1.5.0"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -241,6 +241,28 @@ Comentário: // até o fim da linha.
                                 dlist_get(l,i) dlist_set(l,i,v)
                                 dlist_clear(l) dlist_to_tensor(l)
                   import "stdlib/tensor_d.ay" pra usar.
+      autograd.ay diferenciação automática (reverse-mode), em cima do
+                  tensor_d.ay — o motor por trás de treinar qualquer coisa
+                  (regressão, MLP, atenção) sem derivar nada à mão. Cada
+                  "Var" guarda valor + gradiente + como foi calculado;
+                  ag_backward percorre o grafo de trás pra frente.
+                    nó (Var):   ag_leaf(tensor) ag_value(v) ag_grad(v)
+                                ag_zero_grad(v) ag_backward(saida)
+                    aritmética: ag_add ag_sub ag_mul ag_div ag_neg
+                                ag_scale(a,fator) ag_add_scalar(a,c)
+                    matriz 2D:  ag_matmul ag_transpose2 ag_add_row_bias
+                    reduções:   ag_sum(a) ag_mean(a)
+                    ativações:  ag_relu ag_sigmoid ag_tanh ag_exp
+                    transformer: ag_softmax_row ag_layer_norm(a,eps)
+                                ag_linear(x,w,b) ag_attention(q,k,v)
+                    treino:     ag_sgd_step(v,lr) — w.value -= lr*w.grad
+                    depuração:  ag_print(v)
+                  Gradientes ACUMULAM entre chamadas de ag_backward (igual
+                  PyTorch) — use ag_zero_grad nos parâmetros antes de cada
+                  passo novo. Funções que multiplicam por uma constante
+                  (ag_scale, ag_layer_norm) não são diferenciáveis nesse
+                  parâmetro — só no tensor de entrada.
+                  import "stdlib/autograd.ay" pra usar.
 
 --- Pacotes de terceiros (aresy install) ---
     aresy install                instala tudo que já foi registrado

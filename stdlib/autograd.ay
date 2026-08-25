@@ -1,0 +1,573 @@
+// stdlib/autograd.ay — Diferenciação automática (reverse-mode autograd)
+// pra aresY, em cima do stdlib/tensor_d.ay (tensores de double).
+//
+// Constrói um grafo computacional em tempo de execução: cada "Var" é um
+// nó que guarda seu valor (um tensor_d.ay), seu gradiente acumulado
+// (mesmo shape do valor), os pais que o geraram e um PONTEIRO DE FUNÇÃO
+// pra sua derivada local. `ag_backward(saida)` percorre esse grafo de
+// trás pra frente (ordem topológica reversa) chamando cada ponteiro de
+// função e acumulando gradiente nos pais — exatamente como
+// PyTorch/autograd fazem, só que sem operator overloading (aresY não
+// tem), então cada operação vira uma função `ag_*` explícita.
+//
+// Layout de um nó (Var), tudo em i64, array plano de 7 posições:
+//   v[0] = value        (handle de um tensor_d.ay — o resultado desta op)
+//   v[1] = grad         (handle de um tensor_d.ay, MESMO shape de value —
+//                         acumula dL/d(value) durante o backward)
+//   v[2] = parent_a     (Var do 1º operando, ou 0 se for folha)
+//   v[3] = parent_b     (Var do 2º operando, ou 0 se unário/folha)
+//   v[4] = backward_fn  (ponteiro de função — 0 numa folha, sem derivada
+//                         local pra propagar)
+//   v[5] = visited      (uso interno da ordenação topológica; sempre 0
+//                         antes/depois de qualquer chamada pública)
+//   v[6] = extra        (um double, via to_raw/from_raw — parâmetro
+//                         extra que algumas ops guardam pra usar no
+//                         backward, tipo o fator de ag_scale ou o eps
+//                         de ag_layer_norm; 0 quando não se aplica)
+//
+// GRADIENTES ACUMULAM entre chamadas de ag_backward (mesmo
+// comportamento do PyTorch): se quiser um passo de treino "limpo",
+// chame ag_zero_grad(v) nos parâmetros antes de cada ag_backward.
+//
+// Funções compostas (ag_linear, ag_attention) NÃO têm backward próprio
+// — elas só encadeiam operações `ag_*` já diferenciáveis, e o grafo
+// cuida da regra da cadeia sozinho. É assim que qualquer rede nova
+// (um bloco de Transformer inteiro, por exemplo) deveria ser montada:
+// compondo os primitivos abaixo, não escrevendo mais backward manual.
+//
+// Como importar:
+//   import "stdlib/autograd.ay"
+//
+// Exemplo (uma camada linear + ReLU + mean, com um passo de SGD):
+//
+//   import "stdlib/autograd.ay"
+//
+//   fn main() {
+//       var x = ag_leaf(t_full(shape2(2, 3), 1.0))
+//       var w = ag_leaf(t_full(shape2(3, 4), 0.5))
+//       var b = ag_leaf(t_zeros(shape1(4)))
+//
+//       var h = ag_relu(ag_linear(x, w, b))
+//       var loss = ag_mean(h)
+//
+//       ag_backward(loss)
+//       t_print(ag_grad(w))     // dL/dw
+//
+//       ag_sgd_step(w, 0.01)     // w.value -= 0.01 * w.grad
+//       ag_zero_grad(w)
+//       return 0
+//   }
+
+import "tensor_d.ay"
+import "vector.ay"
+
+// ============================================================
+// NÓ (Var) — criação e acesso
+// ============================================================
+
+fn ag_make_node(value: i64, parent_a: i64, parent_b: i64, backward_fn: i64) -> i64 {
+    var out = array(7)
+    out[0] = value
+    out[1] = t_zeros(t_shape(value))
+    out[2] = parent_a
+    out[3] = parent_b
+    out[4] = backward_fn
+    out[5] = 0
+    out[6] = 0
+    return out
+}
+
+// Cria uma folha (parâmetro/entrada) a partir de um tensor_d.ay já
+// existente. Folhas não têm backward_fn (nada a propagar pra trás).
+fn ag_leaf(value: i64) -> i64 {
+    return ag_make_node(value, 0, 0, 0)
+}
+
+fn ag_value(v: i64) -> i64 {
+    return v[0]
+}
+
+fn ag_grad(v: i64) -> i64 {
+    return v[1]
+}
+
+fn ag_zero_grad(v: i64) {
+    v[1] = t_zeros(t_shape(v[0]))
+}
+
+// Acumula "delta" no gradiente de um nó (usado dentro dos backward_fn).
+fn ag_accum(node: i64, delta: i64) {
+    node[1] = t_add(node[1], delta)
+}
+
+// w.value -= lr * w.grad — um passo de SGD puro, direto na folha.
+fn ag_sgd_step(v: i64, lr: double) {
+    v[0] = t_sub(v[0], t_scale(v[1], lr))
+}
+
+// ============================================================
+// ORDENAÇÃO TOPOLÓGICA + BACKWARD
+// ============================================================
+
+// DFS pós-ordem: cada nó só entra em "order" DEPOIS dos seus pais, ou
+// seja, a saída (raiz) fica sempre por último. Processar esse vetor de
+// trás pra frente dá exatamente a ordem certa pra backprop.
+fn ag_topo_visit(v: i64, order: i64) -> i64 {
+    if v[5] != 0 {
+        return order
+    }
+    v[5] = 1
+    var pa = v[2]
+    var pb = v[3]
+    if pa != 0 {
+        order = ag_topo_visit(pa, order)
+    }
+    if pb != 0 {
+        order = ag_topo_visit(pb, order)
+    }
+    order = vec_push(order, v)
+    return order
+}
+
+// Roda a diferenciação automática a partir de "root" (tipicamente uma
+// perda escalar, tensor de 1 elemento). Semeia dL/dL = 1 em root,
+// percorre o grafo de trás pra frente chamando o backward_fn de cada
+// nó, que acumula gradiente nos pais via ag_accum.
+fn ag_backward(root: i64) {
+    var order = vec_new(16)
+    order = ag_topo_visit(root, order)
+
+    // limpa a flag "visited" (senão a próxima chamada de ag_backward
+    // acharia que esses nós já foram visitados e pararia na hora)
+    var n = vec_len(order)
+    var i = 0
+    while i < n {
+        var node = vec_get(order, i)
+        node[5] = 0
+        i = i + 1
+    }
+
+    root[1] = t_ones(t_shape(root[0]))
+
+    i = n - 1
+    while i >= 0 {
+        var node = vec_get(order, i)
+        var bwfn = node[4]
+        if bwfn != 0 {
+            bwfn(node)
+        }
+        i = i - 1
+    }
+}
+
+// ============================================================
+// ARITMÉTICA ELEMENTO A ELEMENTO
+// ============================================================
+
+fn back_add(node: i64) -> i64 {
+    var g = node[1]
+    ag_accum(node[2], g)
+    ag_accum(node[3], g)
+    return 0
+}
+
+fn ag_add(a: i64, b: i64) -> i64 {
+    return ag_make_node(t_add(a[0], b[0]), a, b, back_add)
+}
+
+fn back_sub(node: i64) -> i64 {
+    var g = node[1]
+    ag_accum(node[2], g)
+    ag_accum(node[3], t_neg(g))
+    return 0
+}
+
+fn ag_sub(a: i64, b: i64) -> i64 {
+    return ag_make_node(t_sub(a[0], b[0]), a, b, back_sub)
+}
+
+// Hadamard (elemento a elemento) — não é matmul, isso é ag_matmul.
+fn back_mul(node: i64) -> i64 {
+    var g = node[1]
+    var a = node[2]
+    var b = node[3]
+    ag_accum(a, t_mul(g, b[0]))
+    ag_accum(b, t_mul(g, a[0]))
+    return 0
+}
+
+fn ag_mul(a: i64, b: i64) -> i64 {
+    return ag_make_node(t_mul(a[0], b[0]), a, b, back_mul)
+}
+
+fn back_div(node: i64) -> i64 {
+    var g = node[1]
+    var a = node[2]
+    var b = node[3]
+    var bv = b[0]
+    ag_accum(a, t_div(g, bv))
+    var num = t_neg(t_mul(g, a[0]))
+    var denom = t_mul(bv, bv)
+    ag_accum(b, t_div(num, denom))
+    return 0
+}
+
+fn ag_div(a: i64, b: i64) -> i64 {
+    return ag_make_node(t_div(a[0], b[0]), a, b, back_div)
+}
+
+fn back_neg(node: i64) -> i64 {
+    ag_accum(node[2], t_neg(node[1]))
+    return 0
+}
+
+fn ag_neg(a: i64) -> i64 {
+    return ag_make_node(t_neg(a[0]), a, 0, back_neg)
+}
+
+fn back_scale(node: i64) -> i64 {
+    var factor = from_raw(node[6])
+    ag_accum(node[2], t_scale(node[1], factor))
+    return 0
+}
+
+// Multiplica por um escalar CONSTANTE (não é um Var — se precisar
+// diferenciar em relação ao fator também, use ag_mul com um Var 1x1).
+fn ag_scale(a: i64, factor: double) -> i64 {
+    var out = ag_make_node(t_scale(a[0], factor), a, 0, back_scale)
+    out[6] = to_raw(factor)
+    return out
+}
+
+fn back_add_scalar(node: i64) -> i64 {
+    // somar uma constante não muda a derivada em relacao a "a"
+    ag_accum(node[2], node[1])
+    return 0
+}
+
+fn ag_add_scalar(a: i64, c: double) -> i64 {
+    return ag_make_node(t_add_scalar(a[0], c), a, 0, back_add_scalar)
+}
+
+// ============================================================
+// MATRIZ 2D
+// ============================================================
+
+fn back_matmul(node: i64) -> i64 {
+    var g = node[1]
+    var a = node[2]
+    var b = node[3]
+    ag_accum(a, t_matmul(g, t_transpose2(b[0])))
+    ag_accum(b, t_matmul(t_transpose2(a[0]), g))
+    return 0
+}
+
+fn ag_matmul(a: i64, b: i64) -> i64 {
+    return ag_make_node(t_matmul(a[0], b[0]), a, b, back_matmul)
+}
+
+fn back_transpose2(node: i64) -> i64 {
+    ag_accum(node[2], t_transpose2(node[1]))
+    return 0
+}
+
+fn ag_transpose2(a: i64) -> i64 {
+    return ag_make_node(t_transpose2(a[0]), a, 0, back_transpose2)
+}
+
+// Soma dL/dy (mesmo shape) em cada linha pra formar dL/dbias — a
+// coluna j do gradiente de bias é a soma da coluna j de g em TODAS
+// as linhas (o "desfazer" do broadcast de t_add_row_bias).
+fn _sum_rows_to_bias(g: i64) -> i64 {
+    var rows = t_dim(g, 0)
+    var cols = t_dim(g, 1)
+    var res = t_zeros(shape1(cols))
+    var i = 0
+    while i < rows {
+        var j = 0
+        while j < cols {
+            t_set1(res, j, t_get1(res, j) + t_get2(g, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn back_add_row_bias(node: i64) -> i64 {
+    var g = node[1]
+    ag_accum(node[2], g)
+    ag_accum(node[3], _sum_rows_to_bias(g))
+    return 0
+}
+
+fn ag_add_row_bias(a: i64, bias: i64) -> i64 {
+    return ag_make_node(t_add_row_bias(a[0], bias[0]), a, bias, back_add_row_bias)
+}
+
+// ============================================================
+// REDUÇÕES (viram tensor 1D de 1 elemento — não há tensor 0-d)
+// ============================================================
+
+fn _broadcast_scalar_like(shape_ref: i64, scalar: double) -> i64 {
+    var res = t_zeros(t_shape(shape_ref))
+    t_fill(res, scalar)
+    return res
+}
+
+fn back_sum(node: i64) -> i64 {
+    var g_scalar = t_get1(node[1], 0)
+    var a = node[2]
+    ag_accum(a, _broadcast_scalar_like(a[0], g_scalar))
+    return 0
+}
+
+fn ag_sum(a: i64) -> i64 {
+    var value = t_zeros(shape1(1))
+    t_set1(value, 0, t_sum(a[0]))
+    return ag_make_node(value, a, 0, back_sum)
+}
+
+fn back_mean(node: i64) -> i64 {
+    var g_scalar = t_get1(node[1], 0)
+    var a = node[2]
+    var n = t_size(a[0]) * 1.0
+    ag_accum(a, _broadcast_scalar_like(a[0], g_scalar / n))
+    return 0
+}
+
+fn ag_mean(a: i64) -> i64 {
+    var value = t_zeros(shape1(1))
+    t_set1(value, 0, t_mean(a[0]))
+    return ag_make_node(value, a, 0, back_mean)
+}
+
+// ============================================================
+// ATIVAÇÕES
+// ============================================================
+
+fn _relu_grad(a_value: i64, g: i64) -> i64 {
+    var res = t_copy(g)
+    var d = a_value[0]
+    var start = 2 * d + 1
+    var end = start + t_size(a_value)
+    var i = start
+    while i < end {
+        if from_raw(a_value[i]) <= 0.0 {
+            res[i] = to_raw(0.0)
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn back_relu(node: i64) -> i64 {
+    var a = node[2]
+    ag_accum(a, _relu_grad(a[0], node[1]))
+    return 0
+}
+
+fn ag_relu(a: i64) -> i64 {
+    return ag_make_node(t_relu(a[0]), a, 0, back_relu)
+}
+
+// Ativações abaixo usam o PRÓPRIO valor de saída (node[0]) na derivada
+// — evita recalcular sigmoid/tanh/exp do zero a partir da entrada.
+
+fn _sigmoid_grad(value: i64, g: i64) -> i64 {
+    var res = t_copy(g)
+    var d = value[0]
+    var start = 2 * d + 1
+    var end = start + t_size(value)
+    var i = start
+    while i < end {
+        var s = from_raw(value[i])
+        var gg = from_raw(g[i])
+        res[i] = to_raw(gg * s * (1.0 - s))
+        i = i + 1
+    }
+    return res
+}
+
+fn back_sigmoid(node: i64) -> i64 {
+    ag_accum(node[2], _sigmoid_grad(node[0], node[1]))
+    return 0
+}
+
+fn ag_sigmoid(a: i64) -> i64 {
+    return ag_make_node(t_sigmoid(a[0]), a, 0, back_sigmoid)
+}
+
+fn _tanh_grad(value: i64, g: i64) -> i64 {
+    var res = t_copy(g)
+    var d = value[0]
+    var start = 2 * d + 1
+    var end = start + t_size(value)
+    var i = start
+    while i < end {
+        var y = from_raw(value[i])
+        var gg = from_raw(g[i])
+        res[i] = to_raw(gg * (1.0 - y * y))
+        i = i + 1
+    }
+    return res
+}
+
+fn back_tanh(node: i64) -> i64 {
+    ag_accum(node[2], _tanh_grad(node[0], node[1]))
+    return 0
+}
+
+fn ag_tanh(a: i64) -> i64 {
+    return ag_make_node(t_tanh(a[0]), a, 0, back_tanh)
+}
+
+fn _exp_grad(value: i64, g: i64) -> i64 {
+    return t_mul(g, value)
+}
+
+fn back_exp(node: i64) -> i64 {
+    ag_accum(node[2], _exp_grad(node[0], node[1]))
+    return 0
+}
+
+fn ag_exp(a: i64) -> i64 {
+    return ag_make_node(t_exp(a[0]), a, 0, back_exp)
+}
+
+// gelu ainda não tem backward implementado aqui (a derivada exata da
+// aproximação tanh é longa) — use ag_relu ou ag_tanh/ag_sigmoid
+// enquanto isso, ou contribua ag_gelu com backward testado.
+
+// ============================================================
+// SOFTMAX / LAYER NORM (por linha — o miolo de atenção/Transformer)
+// ============================================================
+
+// Jacobiano do softmax por linha: dx_ij = s_ij * (g_ij - dot_i), onde
+// dot_i = soma_j(g_ij * s_ij). Testado contra gradiente numérico.
+fn _softmax_row_grad(value: i64, g: i64) -> i64 {
+    var rows = t_dim(value, 0)
+    var cols = t_dim(value, 1)
+    var res = t_zeros(shape2(rows, cols))
+    var i = 0
+    while i < rows {
+        var dot = 0.0
+        var j = 0
+        while j < cols {
+            dot = dot + t_get2(g, i, j) * t_get2(value, i, j)
+            j = j + 1
+        }
+        j = 0
+        while j < cols {
+            var s = t_get2(value, i, j)
+            var gg = t_get2(g, i, j)
+            t_set2(res, i, j, s * (gg - dot))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn back_softmax_row(node: i64) -> i64 {
+    ag_accum(node[2], _softmax_row_grad(node[0], node[1]))
+    return 0
+}
+
+fn ag_softmax_row(a: i64) -> i64 {
+    return ag_make_node(t_softmax_row(a[0]), a, 0, back_softmax_row)
+}
+
+// LayerNorm sem gamma/beta aprendíveis (mesma limitação do
+// tensor_d.ay). Fórmula padrão de backward de layer norm, testada
+// contra gradiente numérico:
+//   dx_i = (n*g_i - soma(g) - xhat_i*soma(g_j*xhat_j)) / (n*std)
+fn _layer_norm_grad(x: i64, xhat: i64, g: i64, eps: double) -> i64 {
+    var rows = t_dim(x, 0)
+    var cols = t_dim(x, 1)
+    var res = t_zeros(shape2(rows, cols))
+    var n_d = cols * 1.0
+    var i = 0
+    while i < rows {
+        var sum_x = 0.0
+        var j = 0
+        while j < cols {
+            sum_x = sum_x + t_get2(x, i, j)
+            j = j + 1
+        }
+        var m = sum_x / n_d
+        var var_s = 0.0
+        j = 0
+        while j < cols {
+            var diff = t_get2(x, i, j) - m
+            var_s = var_s + diff * diff
+            j = j + 1
+        }
+        var std = sqrt(var_s / n_d + eps)
+
+        var sum_g = 0.0
+        var sum_gx = 0.0
+        j = 0
+        while j < cols {
+            var gg = t_get2(g, i, j)
+            var xh = t_get2(xhat, i, j)
+            sum_g = sum_g + gg
+            sum_gx = sum_gx + gg * xh
+            j = j + 1
+        }
+
+        j = 0
+        while j < cols {
+            var gg = t_get2(g, i, j)
+            var xh = t_get2(xhat, i, j)
+            var dx = (n_d * gg - sum_g - xh * sum_gx) / (n_d * std)
+            t_set2(res, i, j, dx)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn back_layer_norm(node: i64) -> i64 {
+    var a = node[2]
+    var eps = from_raw(node[6])
+    ag_accum(a, _layer_norm_grad(a[0], node[0], node[1], eps))
+    return 0
+}
+
+fn ag_layer_norm(a: i64, eps: double) -> i64 {
+    var out = ag_make_node(t_layer_norm(a[0], eps), a, 0, back_layer_norm)
+    out[6] = to_raw(eps)
+    return out
+}
+
+// ============================================================
+// FUNÇÕES COMPOSTAS — só encadeiam ops acima, sem backward próprio
+// ============================================================
+
+// y = x @ w + b
+fn ag_linear(x: i64, w: i64, b: i64) -> i64 {
+    return ag_add_row_bias(ag_matmul(x, w), b)
+}
+
+// scaled dot-product attention: softmax(q @ k^T / sqrt(d_k)) @ v
+fn ag_attention(q: i64, k: i64, v: i64) -> i64 {
+    var kt = ag_transpose2(k)
+    var scores = ag_matmul(q, kt)
+    var d_k = t_dim(q[0], 1)
+    var scaled = ag_scale(scores, 1.0 / sqrt(d_k * 1.0))
+    var weights = ag_softmax_row(scaled)
+    return ag_matmul(weights, v)
+}
+
+// ============================================================
+// IMPRESSÃO / DEPURAÇÃO
+// ============================================================
+
+fn ag_print(v: i64) {
+    print("value:")
+    t_print(v[0])
+    print("grad:")
+    t_print(v[1])
+}

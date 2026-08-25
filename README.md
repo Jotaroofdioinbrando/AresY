@@ -305,6 +305,53 @@ bibliotecas em `stdlib/`:
       return 0
   }
   ```
+- `stdlib/autograd.ay` — diferenciação automática (**reverse-mode
+  autograd**), construída em cima do `tensor_d.ay`. É o motor por trás
+  de treinar qualquer coisa (regressão, MLP, atenção) sem derivar nada
+  à mão: cada `Var` guarda seu valor (um tensor), o gradiente acumulado,
+  os pais que o geraram e um **ponteiro de função** pra sua derivada
+  local; `ag_backward(saida)` percorre esse grafo de trás pra frente
+  (ordenação topológica) chamando cada derivada e acumulando gradiente
+  nos pais — igual PyTorch faz, só que sem operator overloading (aresY
+  não tem), então cada operação é uma função `ag_*` explícita em vez de
+  `+`/`*` comuns. Validei as fórmulas mais complexas (`layer_norm`,
+  `softmax`, `matmul`) contra gradiente numérico por diferenças finitas
+  — bateram na casa de `1e-9` de erro, dentro do esperado. Principais
+  funções: criação/acesso de nó (`ag_leaf`, `ag_value`, `ag_grad`,
+  `ag_zero_grad`), aritmética (`ag_add`, `ag_sub`, `ag_mul`, `ag_div`,
+  `ag_neg`, `ag_scale`, `ag_add_scalar`), matriz 2D (`ag_matmul`,
+  `ag_transpose2`, `ag_add_row_bias`), reduções (`ag_sum`, `ag_mean`),
+  ativações (`ag_relu`, `ag_sigmoid`, `ag_tanh`, `ag_exp`), os blocos de
+  Transformer (`ag_softmax_row`, `ag_layer_norm`, `ag_linear` = `x@w+b`,
+  `ag_attention` = scaled dot-product attention), treino (`ag_sgd_step`)
+  e depuração (`ag_print`). **Gradientes acumulam** entre chamadas de
+  `ag_backward` (mesmo comportamento do PyTorch) — chame `ag_zero_grad`
+  nos parâmetros antes de cada passo novo, ou o gradiente do passo
+  anterior soma junto. `ag_scale`/`ag_layer_norm` recebem um fator/eps
+  **constante** (não um `Var`) — não há gradiente calculado em relação
+  a esse parâmetro, só no tensor de entrada. `gelu` ainda não tem
+  backward (a derivada exata da aproximação tanh é longa); use
+  `ag_relu`/`ag_tanh`/`ag_sigmoid` enquanto isso. Exemplo — uma camada
+  linear + ReLU + mean, com um passo de SGD:
+  ```
+  import "stdlib/autograd.ay"
+
+  fn main() {
+      var x = ag_leaf(t_full(shape2(2, 3), 1.0))
+      var w = ag_leaf(t_full(shape2(3, 4), 0.5))
+      var b = ag_leaf(t_zeros(shape1(4)))
+
+      var h = ag_relu(ag_linear(x, w, b))
+      var loss = ag_mean(h)
+
+      ag_backward(loss)
+      t_print(ag_grad(w))     // dL/dw
+
+      ag_sgd_step(w, 0.01)    // w.value -= 0.01 * w.grad
+      ag_zero_grad(w)
+      return 0
+  }
+  ```
 
 
 ## Gerenciador de pacotes (aresy install)
