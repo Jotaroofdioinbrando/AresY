@@ -13,6 +13,7 @@ programa_cpp
 *_cpp
 teste_backslash
 *.out
+*.cpp
 
 # C/C++ compilados
 *.o
