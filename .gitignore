@@ -47,4 +47,5 @@ fable_dev.py
 
 # Ia
 *.fableinclude
+*.json
 *.txt

@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "0.8.0"
+VERSION = "1.0.0"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -1744,10 +1744,16 @@ import shutil
 import subprocess
 import tempfile
 import json
+import urllib.request
+import urllib.error
 
 
 PACKAGES_DIR = "ares_packages"
 MANIFEST_NAME = "aresy.json"
+# Índice central de pacotes ("PyPI do aresY") — usado quando "aresy install"
+# recebe só um nome, sem URL nenhuma (ex.: "aresy install numAres").
+INDEX_REPO_RAW_BASE = "https://raw.githubusercontent.com/Jotaroofdioinbrando/aresy-index/main"
+INDEX_URL = f"{INDEX_REPO_RAW_BASE}/index.json"
 
 
 def _resolve_ay_import(name, base_dir):
@@ -1857,6 +1863,8 @@ def _pkg_name_from_url(url):
     name = url.rstrip("/").split("/")[-1]
     if name.endswith(".git"):
         name = name[:-4]
+    elif name.endswith(".ay"):
+        name = name[:-3]
     return name
 
 
@@ -1864,11 +1872,82 @@ def _git_available():
     return shutil.which("git") is not None
 
 
+def _http_get(url, timeout=15):
+    req = urllib.request.Request(url, headers={"User-Agent": "aresy-package-manager"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code} ao acessar {url}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"não consegui conectar em {url} ({e.reason})")
+
+
+def _looks_like_raw_file_url(url):
+    """Distingue 'URL de arquivo .ay cru' (ex.: raw.githubusercontent.com/.../nome.ay)
+    de 'URL de repositório git' (ex.: github.com/user/repo ou algo.git). O
+    "aresy install" trata os dois de formas bem diferentes: o primeiro é um
+    download HTTP direto de um arquivo; o segundo é um "git clone" de
+    verdade."""
+    return url.startswith("http://") or url.startswith("https://")
+
+
+def _resolve_from_index(name):
+    """Resolve um nome de pacote (sem URL) pesquisando no aresy-index —
+    o índice central de bibliotecas da comunidade. Devolve a URL raw
+    completa do arquivo .ay do pacote."""
+    try:
+        raw = _http_get(INDEX_URL)
+    except RuntimeError as e:
+        raise RuntimeError(f"não consegui acessar o índice de pacotes ({INDEX_URL}): {e}")
+    try:
+        index = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RuntimeError(f"o índice de pacotes veio corrompido (JSON inválido): {e}")
+    if name not in index:
+        raise RuntimeError(f"pacote '{name}' não está no aresy-index (confira o nome, é sensível a maiúsculas)")
+    entry = index[name]
+    if _looks_like_raw_file_url(entry):
+        return entry
+    # caminho relativo dentro do próprio repositório aresy-index
+    return f"{INDEX_REPO_RAW_BASE}/{entry.lstrip('/')}"
+
+
+def _install_one_file(dest_dir, name, url):
+    """Baixa um pacote de arquivo único (.ay cru) via HTTP direto — sem
+    git, sem clone. É o caso comum de um pacote publicado no aresy-index."""
+    print(f"  {name}: baixando {url}...")
+    try:
+        data = _http_get(url)
+    except RuntimeError as e:
+        print(f"  {name}: FALHOU -> {e}")
+        return False
+    os.makedirs(dest_dir, exist_ok=True)
+    entry_path = os.path.join(dest_dir, f"{name}.ay")
+    try:
+        with open(entry_path, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        print(f"  {name}: FALHOU ao salvar em {entry_path} -> {e}")
+        return False
+    print(f"  {name}: OK")
+    return True
+
+
 def _install_one(project_dir, name, url):
+    dest = os.path.join(project_dir, PACKAGES_DIR, name)
+
+    if _looks_like_raw_file_url(url) and url.endswith(".ay"):
+        # é um link direto pra um arquivo .ay (o formato que o aresy-index
+        # usa) — baixa o arquivo, não tenta clonar como se fosse um repo.
+        return _install_one_file(dest, name, url)
+
+    # senão, assume que é um repositório git de verdade (github.com/user/repo,
+    # algo.git, etc.) — mantém o comportamento antigo pra quem publica a
+    # biblioteca como um repo próprio em vez de mandar pro aresy-index.
     if not _git_available():
         print("Erro: 'git' não foi encontrado. Instala com: pkg install git")
         return False
-    dest = os.path.join(project_dir, PACKAGES_DIR, name)
     if os.path.isdir(os.path.join(dest, ".git")):
         print(f"  {name}: já instalado, atualizando (git pull)...")
         proc = subprocess.run(["git", "-C", dest, "pull", "--quiet"], capture_output=True, text=True)
@@ -1896,13 +1975,30 @@ def cmd_install(args):
         deps = manifest["dependencies"]
         if not deps:
             print(f"Nenhuma dependência em {MANIFEST_NAME} (nada pra instalar).")
-            print(f"Uso: aresy install <url-do-git> [nome]")
+            print(f"Uso: aresy install <nome-do-pacote>          (procura no aresy-index)")
+            print(f"     aresy install <url> [nome]              (git ou link .ay direto)")
             return
         print(f"Instalando {len(deps)} pacote(s) de {MANIFEST_NAME}...")
         ok = all(_install_one(project_dir, name, url) for name, url in deps.items())
         sys.exit(0 if ok else 1)
-    url = args[0]
-    name = args[1] if len(args) > 1 else _pkg_name_from_url(url)
+
+    first = args[0]
+    if "://" in first:
+        # "aresy install <url> [nome]" — URL explícita, git ou .ay cru
+        url = first
+        name = args[1] if len(args) > 1 else _pkg_name_from_url(url)
+    else:
+        # "aresy install <nome>" — sem URL, procura no índice central
+        # (aresy-index), que é a forma normal de instalar hoje em dia.
+        name = first
+        print(f"Procurando '{name}' no índice de pacotes (aresy-index)...")
+        try:
+            url = _resolve_from_index(name)
+        except RuntimeError as e:
+            print(f"Erro: {e}")
+            sys.exit(1)
+        print(f"  encontrado: {url}")
+
     manifest["dependencies"][name] = url
     _save_manifest(project_dir, manifest)
     ok = _install_one(project_dir, name, url)
@@ -2342,7 +2438,8 @@ def _usage():
         "  aresy build programa.ay [saida.ll] [--triple TRIPLE] [--no-gc]\n"
         "                                 gera LLVM IR pra compilar com clang na mão\n"
         "  aresy install                 instala as dependências listadas em aresy.json\n"
-        "  aresy install <url-git> [nome] adiciona e instala uma dependência (tipo pip install)\n"
+        "  aresy install <nome>           instala um pacote pelo nome (procura no aresy-index)\n"
+        "  aresy install <url> [nome]     instala de uma URL direta (repo git ou link .ay cru)\n"
         "  aresy uninstall <nome>        remove uma dependência\n"
         "  aresy list                    lista as dependências e se estão instaladas\n"
         "  aresy --version               mostra a versão do compilador\n"
