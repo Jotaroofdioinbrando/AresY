@@ -569,3 +569,772 @@ fn where(cond_arr: i64, true_arr: i64, false_arr: i64) -> i64 {
     }
     return res
 }
+
+// --- Novas Funcionalidades Adicionais (numAres Avançado II) ---
+
+fn random_integers(n: i64, low: i64, high: i64) -> i64 {
+    if n < 0 {
+        throw "random_integers: n nao pode ser negativo"
+    }
+    if high < low {
+        throw "random_integers: high deve ser maior ou igual a low"
+    }
+    var arr = array(n + 1)
+    arr[0] = n
+    var range = high - low + 1
+    var i = 1
+    while i <= n {
+        arr[i] = low + random(range)
+        i = i + 1
+    }
+    return arr
+}
+
+fn median(arr: i64) -> double {
+    var n = arr[0]
+    if n == 0 {
+        throw "median: array vazio"
+    }
+    var sorted = sort(arr)
+    var mid = 0
+    var mid1 = 0
+    var mid2 = 0
+    if n % 2 == 1 {
+        mid = (n + 1) / 2
+        return sorted[mid] * 1.0
+    } else {
+        mid1 = n / 2
+        mid2 = mid1 + 1
+        return ((sorted[mid1] + sorted[mid2]) * 1.0) / 2.0
+    }
+}
+
+fn ptp(arr: i64) -> i64 {
+    var n = arr[0]
+    if n == 0 {
+        throw "ptp: array vazio"
+    }
+    return amax(arr) - amin(arr)
+}
+
+fn square(arr: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    while i <= n {
+        res[i] = arr[i] * arr[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn power(arr: i64, exp: i64) -> i64 {
+    if exp < 0 {
+        throw "power: expoente negativo nao suportado para inteiros"
+    }
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    var base = 0
+    var p = 1
+    var e = 0
+    while i <= n {
+        base = arr[i]
+        p = 1
+        e = 0
+        while e < exp {
+            p = p * base
+            e = e + 1
+        }
+        res[i] = p
+        i = i + 1
+    }
+    return res
+}
+
+fn mod_array(arr1: i64, arr2: i64) -> i64 {
+    var n1 = arr1[0]
+    var n2 = arr2[0]
+    if n1 != n2 {
+        throw "mod_array: arrays com tamanhos diferentes"
+    }
+    var res = array(n1 + 1)
+    res[0] = n1
+    var i = 1
+    while i <= n1 {
+        if arr2[i] == 0 {
+            throw "mod_array: divisao por zero no elemento"
+        }
+        res[i] = arr1[i] % arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn flip(arr: i64) -> i64 {
+    var n = arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    while i <= n {
+        res[i] = arr[n - i + 1]
+        i = i + 1
+    }
+    return res
+}
+
+fn roll(arr: i64, shift: i64) -> i64 {
+    var n = arr[0]
+    if n == 0 {
+        return copy(arr)
+    }
+    var s = shift % n
+    if s < 0 {
+        s = s + n
+    }
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    var target_idx = 0
+    while i <= n {
+        target_idx = (i - 1 + s) % n + 1
+        res[target_idx] = arr[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn unique(arr: i64) -> i64 {
+    var n = arr[0]
+    if n == 0 {
+        var empty = array(1)
+        empty[0] = 0
+        return empty
+    }
+    var sorted = sort(arr)
+    var u_count = 1
+    var i = 2
+    while i <= n {
+        if sorted[i] != sorted[i - 1] {
+            u_count = u_count + 1
+        }
+        i = i + 1
+    }
+    var res = array(u_count + 1)
+    res[0] = u_count
+    res[1] = sorted[1]
+    var idx = 2
+    i = 2
+    while i <= n {
+        if sorted[i] != sorted[i - 1] {
+            res[idx] = sorted[i]
+            idx = idx + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn isin(arr: i64, values_arr: i64) -> i64 {
+    var n = arr[0]
+    var nv = values_arr[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 1
+    var val = 0
+    var found = 0
+    var j = 1
+    while i <= n {
+        val = arr[i]
+        found = 0
+        j = 1
+        while j <= nv {
+            if values_arr[j] == val {
+                found = 1
+                j = nv + 1
+            } else {
+                j = j + 1
+            }
+        }
+        res[i] = found
+        i = i + 1
+    }
+    return res
+}
+
+fn extract(cond_arr: i64, arr: i64) -> i64 {
+    var n = cond_arr[0]
+    var n_arr = arr[0]
+    if n != n_arr {
+        throw "extract: cond_arr e arr com tamanhos diferentes"
+    }
+    var count = 0
+    var i = 1
+    while i <= n {
+        if cond_arr[i] != 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    var res = array(count + 1)
+    res[0] = count
+    var idx = 1
+    i = 1
+    while i <= n {
+        if cond_arr[i] != 0 {
+            res[idx] = arr[i]
+            idx = idx + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn nonzero(arr: i64) -> i64 {
+    var n = arr[0]
+    var count = count_nonzero(arr)
+    var res = array(count + 1)
+    res[0] = count
+    var idx = 1
+    var i = 1
+    while i <= n {
+        if arr[i] != 0 {
+            res[idx] = i - 1
+            idx = idx + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn intersect1d(arr1: i64, arr2: i64) -> i64 {
+    var u1 = unique(arr1)
+    var u2 = unique(arr2)
+    var n1 = u1[0]
+    var n2 = u2[0]
+    var count = 0
+    var i = 1
+    var val = 0
+    var j = 1
+    while i <= n1 {
+        val = u1[i]
+        j = 1
+        while j <= n2 {
+            if u2[j] == val {
+                count = count + 1
+                j = n2 + 1
+            } else {
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    var res = array(count + 1)
+    res[0] = count
+    var idx = 1
+    i = 1
+    while i <= n1 {
+        val = u1[i]
+        j = 1
+        while j <= n2 {
+            if u2[j] == val {
+                res[idx] = val
+                idx = idx + 1
+                j = n2 + 1
+            } else {
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn union1d(arr1: i64, arr2: i64) -> i64 {
+    var c = concat(arr1, arr2)
+    return unique(c)
+}
+
+fn setdiff1d(arr1: i64, arr2: i64) -> i64 {
+    var u1 = unique(arr1)
+    var u2 = unique(arr2)
+    var n1 = u1[0]
+    var n2 = u2[0]
+    var count = 0
+    var i = 1
+    var val = 0
+    var found = 0
+    var j = 1
+    while i <= n1 {
+        val = u1[i]
+        found = 0
+        j = 1
+        while j <= n2 {
+            if u2[j] == val {
+                found = 1
+                j = n2 + 1
+            } else {
+                j = j + 1
+            }
+        }
+        if found == 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    var res = array(count + 1)
+    res[0] = count
+    var idx = 1
+    i = 1
+    while i <= n1 {
+        val = u1[i]
+        found = 0
+        j = 1
+        while j <= n2 {
+            if u2[j] == val {
+                found = 1
+                j = n2 + 1
+            } else {
+                j = j + 1
+            }
+        }
+        if found == 0 {
+            res[idx] = val
+            idx = idx + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+
+// --- Suporte a Matrizes 2D e Álgebra Linear ---
+//
+// Convenção para Matrizes 2D:
+// As matrizes 2D são representadas como um array plano de i64 de tamanho (rows * cols + 2).
+// - arr[0] armazena o número de linhas (rows).
+// - arr[1] armazena o número de colunas (cols).
+// - O elemento na linha r (0-indexed) e coluna c (0-indexed) está no índice: 2 + r * cols + c.
+
+fn zeros_2d(rows: i64, cols: i64) -> i64 {
+    if rows <= 0 { throw "zeros_2d: rows deve ser maior que zero" }
+    if cols <= 0 { throw "zeros_2d: cols deve ser maior que zero" }
+    var sz = rows * cols
+    var arr = array(sz + 2)
+    arr[0] = rows
+    arr[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        arr[i] = 0
+        i = i + 1
+    }
+    return arr
+}
+
+fn ones_2d(rows: i64, cols: i64) -> i64 {
+    if rows <= 0 { throw "ones_2d: rows deve ser maior que zero" }
+    if cols <= 0 { throw "ones_2d: cols deve ser maior que zero" }
+    var sz = rows * cols
+    var arr = array(sz + 2)
+    arr[0] = rows
+    arr[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        arr[i] = 1
+        i = i + 1
+    }
+    return arr
+}
+
+fn full_2d(rows: i64, cols: i64, val: i64) -> i64 {
+    if rows <= 0 { throw "full_2d: rows deve ser maior que zero" }
+    if cols <= 0 { throw "full_2d: cols deve ser maior que zero" }
+    var sz = rows * cols
+    var arr = array(sz + 2)
+    arr[0] = rows
+    arr[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        arr[i] = val
+        i = i + 1
+    }
+    return arr
+}
+
+fn eye(n: i64) -> i64 {
+    if n <= 0 { throw "eye: n deve ser maior que zero" }
+    var arr = zeros_2d(n, n)
+    var i = 0
+    while i < n {
+        arr[2 + i * n + i] = 1
+        i = i + 1
+    }
+    return arr
+}
+
+fn get_2d(arr: i64, r: i64, c: i64) -> i64 {
+    var rows = arr[0]
+    var cols = arr[1]
+    if r < 0 { throw "get_2d: indice de linha negativo" }
+    if r >= rows { throw "get_2d: indice de linha fora dos limites" }
+    if c < 0 { throw "get_2d: indice de coluna negativo" }
+    if c >= cols { throw "get_2d: indice de coluna fora dos limites" }
+    return arr[2 + r * cols + c]
+}
+
+fn set_2d(arr: i64, r: i64, c: i64, val: i64) {
+    var rows = arr[0]
+    var cols = arr[1]
+    if r < 0 { throw "set_2d: indice de linha negativo" }
+    if r >= rows { throw "set_2d: indice de linha fora dos limites" }
+    if c < 0 { throw "set_2d: indice de coluna negativo" }
+    if c >= cols { throw "set_2d: indice de coluna fora dos limites" }
+    arr[2 + r * cols + c] = val
+}
+
+fn shape_2d(arr: i64) -> i64 {
+    var sh = array(3)
+    sh[0] = 2
+    sh[1] = arr[0]
+    sh[2] = arr[1]
+    return sh
+}
+
+fn copy_2d(arr: i64) -> i64 {
+    var rows = arr[0]
+    var cols = arr[1]
+    var sz = rows * cols
+    var res = array(sz + 2)
+    res[0] = rows
+    res[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        res[i] = arr[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn fill_2d(arr: i64, val: i64) {
+    var rows = arr[0]
+    var cols = arr[1]
+    var sz = rows * cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        arr[i] = val
+        i = i + 1
+    }
+}
+
+fn check_dims_2d(arr1: i64, arr2: i64, op_name: str) {
+    if arr1[0] != arr2[0] {
+        throw op_name + ": numero de linhas incompativel"
+    }
+    if arr1[1] != arr2[1] {
+        throw op_name + ": numero de colunas incompativel"
+    }
+}
+
+fn add_2d(arr1: i64, arr2: i64) -> i64 {
+    check_dims_2d(arr1, arr2, "add_2d")
+    var rows = arr1[0]
+    var cols = arr1[1]
+    var sz = rows * cols
+    var res = array(sz + 2)
+    res[0] = rows
+    res[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        res[i] = arr1[i] + arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn sub_2d(arr1: i64, arr2: i64) -> i64 {
+    check_dims_2d(arr1, arr2, "sub_2d")
+    var rows = arr1[0]
+    var cols = arr1[1]
+    var sz = rows * cols
+    var res = array(sz + 2)
+    res[0] = rows
+    res[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        res[i] = arr1[i] - arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn mul_2d(arr1: i64, arr2: i64) -> i64 {
+    check_dims_2d(arr1, arr2, "mul_2d")
+    var rows = arr1[0]
+    var cols = arr1[1]
+    var sz = rows * cols
+    var res = array(sz + 2)
+    res[0] = rows
+    res[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        res[i] = arr1[i] * arr2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn scale_2d(arr: i64, factor: i64) -> i64 {
+    var rows = arr[0]
+    var cols = arr[1]
+    var sz = rows * cols
+    var res = array(sz + 2)
+    res[0] = rows
+    res[1] = cols
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        res[i] = arr[i] * factor
+        i = i + 1
+    }
+    return res
+}
+
+fn transpose_2d(arr: i64) -> i64 {
+    var rows = arr[0]
+    var cols = arr[1]
+    var res = zeros_2d(cols, rows)
+    var r = 0
+    while r < rows {
+        var c = 0
+        while c < cols {
+            res[2 + c * rows + r] = arr[2 + r * cols + c]
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return res
+}
+
+fn matmul_2d(arr1: i64, arr2: i64) -> i64 {
+    var r1 = arr1[0]
+    var c1 = arr1[1]
+    var r2 = arr2[0]
+    var c2 = arr2[1]
+    if c1 != r2 {
+        throw "matmul_2d: dimensoes incompativeis para multiplicacao matricial"
+    }
+    var res = zeros_2d(r1, c2)
+    var i = 0
+    while i < r1 {
+        var j = 0
+        while j < c2 {
+            var sum = 0
+            var k = 0
+            while k < c1 {
+                sum = sum + (arr1[2 + i * c1 + k] * arr2[2 + k * c2 + j])
+                k = k + 1
+            }
+            res[2 + i * c2 + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn sum_2d(arr: i64) -> i64 {
+    var rows = arr[0]
+    var cols = arr[1]
+    var sz = rows * cols
+    var s = 0
+    var i = 2
+    var end = sz + 2
+    while i < end {
+        s = s + arr[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn amin_2d(arr: i64) -> i64 {
+    var rows = arr[0]
+    var cols = arr[1]
+    var sz = rows * cols
+    if sz == 0 {
+        throw "amin_2d: matriz vazia"
+    }
+    var m = arr[2]
+    var i = 3
+    var end = sz + 2
+    while i < end {
+        if arr[i] < m {
+            m = arr[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn amax_2d(arr: i64) -> i64 {
+    var rows = arr[0]
+    var cols = arr[1]
+    var sz = rows * cols
+    if sz == 0 {
+        throw "amax_2d: matriz vazia"
+    }
+    var m = arr[2]
+    var i = 3
+    var end = sz + 2
+    while i < end {
+        if arr[i] > m {
+            m = arr[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn print_2d(arr: i64) {
+    var rows = arr[0]
+    var cols = arr[1]
+    print("[")
+    var r = 0
+    while r < rows {
+        var s = "  ["
+        var c = 0
+        while c < cols {
+            s = s + str(arr[2 + r * cols + c])
+            if c < cols - 1 {
+                s = s + ", "
+            }
+            c = c + 1
+        }
+        s = s + "]"
+        if r < rows - 1 {
+            s = s + ","
+        }
+        print(s)
+        r = r + 1
+    }
+    print("]")
+}
+
+// --- Álgebra Linear 2D ---
+
+fn matvec_mul(mat: i64, vec: i64) -> i64 {
+    var rows = mat[0]
+    var cols = mat[1]
+    var n = vec[0]
+    if cols != n {
+        throw "matvec_mul: dimensoes incompativeis"
+    }
+    var res = array(rows + 1)
+    res[0] = rows
+    var r = 0
+    while r < rows {
+        var sum = 0
+        var c = 0
+        while c < cols {
+            sum = sum + (mat[2 + r * cols + c] * vec[1 + c])
+            c = c + 1
+        }
+        res[1 + r] = sum
+        r = r + 1
+    }
+    return res
+}
+
+fn det_2x2(mat: i64) -> i64 {
+    var rows = mat[0]
+    var cols = mat[1]
+    if rows != 2 { throw "det_2x2: matriz deve ser 2x2" }
+    if cols != 2 { throw "det_2x2: matriz deve ser 2x2" }
+    var a = mat[2]
+    var b = mat[3]
+    var c = mat[4]
+    var d = mat[5]
+    return (a * d) - (b * c)
+}
+
+fn det_3x3(mat: i64) -> i64 {
+    var rows = mat[0]
+    var cols = mat[1]
+    if rows != 3 { throw "det_3x3: matriz deve ser 3x3" }
+    if cols != 3 { throw "det_3x3: matriz deve ser 3x3" }
+    var a = mat[2]
+    var b = mat[3]
+    var c = mat[4]
+    var d = mat[5]
+    var e = mat[6]
+    var f = mat[7]
+    var g = mat[8]
+    var h = mat[9]
+    var i = mat[10]
+    
+    var term1 = a * ((e * i) - (f * h))
+    var term2 = b * ((d * i) - (f * g))
+    var term3 = c * ((d * h) - (e * g))
+    return term1 - term2 + term3
+}
+
+fn inv_2x2(mat: i64, scale: i64) -> i64 {
+    var rows = mat[0]
+    var cols = mat[1]
+    if rows != 2 { throw "inv_2x2: matriz deve ser 2x2" }
+    if cols != 2 { throw "inv_2x2: matriz deve ser 2x2" }
+    var det = det_2x2(mat)
+    if det == 0 {
+        throw "inv_2x2: determinante e zero, matriz nao invertivel"
+    }
+    var a = mat[2]
+    var b = mat[3]
+    var c = mat[4]
+    var d = mat[5]
+    
+    var res = zeros_2d(2, 2)
+    res[2] = (d * scale) / det
+    res[3] = (-b * scale) / det
+    res[4] = (-c * scale) / det
+    res[5] = (a * scale) / det
+    return res
+}
+
+fn solve_2x2(mat: i64, vec: i64, scale: i64) -> i64 {
+    var rows = mat[0]
+    var cols = mat[1]
+    if rows != 2 { throw "solve_2x2: matriz deve ser 2x2" }
+    if cols != 2 { throw "solve_2x2: matriz deve ser 2x2" }
+    var n = vec[0]
+    if n != 2 { throw "solve_2x2: vetor deve ter tamanho 2" }
+    
+    var det = det_2x2(mat)
+    if det == 0 {
+        throw "solve_2x2: determinante e zero, sistema nao possui solucao unica"
+    }
+    
+    var a = mat[2]
+    var b = mat[3]
+    var c = mat[4]
+    var d = mat[5]
+    var b1 = vec[1]
+    var b2 = vec[2]
+    
+    var det_x = (b1 * d) - (b * b2)
+    var det_y = (a * b2) - (b1 * c)
+    
+    var res = array(3)
+    res[0] = 2
+    res[1] = (det_x * scale) / det
+    res[2] = (det_y * scale) / det
+    return res
+}

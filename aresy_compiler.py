@@ -71,6 +71,7 @@ Comentário: // até o fim da linha.
 --- Controle de fluxo ---
     if cond { ... } else { ... }        // "else" é opcional
     while cond { ... }
+    break                                // sai imediatamente do loop mais interno
     return expr                          // ou "return" sozinho (void)
 
 --- Operadores ---
@@ -180,7 +181,7 @@ TOKEN_SPEC = [
 ]
 MASTER_RE = re.compile("|".join(f"(?P<{n}>{p})" for n, p in TOKEN_SPEC))
 KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false",
-            "extern", "import", "try", "catch", "throw"}
+            "extern", "import", "try", "catch", "throw", "break"}
 
 # Nomes de tipo aceitos em anotações (fn e extern). Mapeiam pro vocabulário
 # interno do compilador: "i64", "double", "str", "void".
@@ -290,6 +291,8 @@ class TryCatch:
         self.try_body, self.catch_var, self.catch_body = try_body, catch_var, catch_body
 class Throw:
     def __init__(self, expr): self.expr = expr
+class Break:
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +370,9 @@ class Parser:
         if tok.kind == "THROW":
             self.advance()
             return Throw(self.parse_expr())
+        if tok.kind == "BREAK":
+            self.advance()
+            return Break()
         if tok.kind == "VAR":
             self.advance()
             name = self.expect("ID").value
@@ -666,6 +672,7 @@ class CodeGen:
         self.imports = []     # nomes de libs de "import" (viram -lNOME na hora de linkar)
         self.catch_stack = []      # labels dos catch ativos (mais interno primeiro), por função
         self.func_exc_exit = None  # label pra onde pular se uma exceção escapar de todo try da função atual
+        self.loop_stack = []
 
     def new_id(self):
         self.counter += 1
@@ -838,6 +845,7 @@ class CodeGen:
         func_uid = self.new_id()
         self.func_exc_exit = f"func_exc_exit_{func_uid}"
         self.catch_stack = []
+        self.loop_stack = []
 
         if is_main:
             if self.use_gc:
@@ -1036,14 +1044,17 @@ class CodeGen:
 
         elif isinstance(node, While):
             uid = self.new_id()
+            exit_label = f"be_{uid}"
+            self.loop_stack.append(exit_label)
             lines.append(f"  br label %c_{uid}")
             lines.append(f"c_{uid}:")
             cond_t, cond_v = self.gen_expr(node.cond, env, lines)
-            lines.append(f"  br i1 {cond_v}, label %bt_{uid}, label %be_{uid}")
+            lines.append(f"  br i1 {cond_v}, label %bt_{uid}, label %{exit_label}")
             lines.append(f"bt_{uid}:")
             for s in node.body: self.gen_stmt(s, env, lines, func_ret_type)
             lines.append(f"  br label %c_{uid}")
-            lines.append(f"be_{uid}:")
+            self.loop_stack.pop()
+            lines.append(f"{exit_label}:")
 
         elif isinstance(node, TryCatch):
             uid = self.new_id()
@@ -1077,6 +1088,14 @@ class CodeGen:
                 self.gen_stmt(s, env, lines, func_ret_type)
             lines.append(f"  br label %{end_label}")
             lines.append(f"{end_label}:")
+
+        elif isinstance(node, Break):
+            if not self.loop_stack:
+                raise CompileError("Instrução 'break' fora de um loop")
+            target = self.loop_stack[-1]
+            lines.append(f"  br label %{target}")
+            uid = self.new_id()
+            lines.append(f"unreachable_brk_{uid}:")
 
         elif isinstance(node, Throw):
             t, v = self.gen_expr(node.expr, env, lines)
@@ -1860,6 +1879,7 @@ class ReplSession:
         func_uid = self.codegen.new_id()
         self.codegen.func_exc_exit = f"func_exc_exit_{func_uid}"
         self.codegen.catch_stack = []
+        self.codegen.loop_stack = []
 
         # reinjeta variáveis de rounds anteriores como literais
         for name, t in self.var_types.items():
@@ -2017,7 +2037,7 @@ def repl(target_triple=None, use_gc=True):
 def compile_source(source, target_triple=None, use_gc=True, source_path=None):
     """Retorna (ir_llvm, lista_de_libs_importadas).
 
-    source_path, quando informado, é usado como base pra resolver imports
+    source_path, when informado, é usado como base pra resolver imports
     relativos de biblioteca .ay (ex.: import "stdlib/mathx.ay" a partir de
     onde o arquivo principal está, não do diretório em que o `aresy` foi
     chamado)."""
