@@ -1,0 +1,634 @@
+// stdlib/tensor.ay — Tensores dinâmicos N-dimensionais para aresY.
+//
+// Convenção de layout (tudo em i64, array plano — aresY só tem array 1D):
+//
+//   t[0]            = ndim (D), o número de dimensões do tensor
+//   t[1 .. D]       = shape:   t[1 + d]     = tamanho da dimensão d      (d = 0..D-1)
+//   t[D+1 .. 2*D]   = strides: t[1 + D + d] = passo da dimensão d (row-major / C-order)
+//   t[2*D+1 .. fim] = dados, tamanho total = produto(shape), guardados em ordem row-major
+//
+// "Descritores" (usados pra passar um shape ou um índice multi-dimensional
+// como parâmetro, já que aresY não tem funções variádicas) seguem a MESMA
+// convenção dos arrays 1D do numares.ay: desc[0] = quantidade (D),
+// desc[1..D] = valores. Dá pra montar um descritor à mão:
+//
+//   var forma = array(4)
+//   forma[0] = 3        // D = 3 dimensões
+//   forma[1] = 2
+//   forma[2] = 3
+//   forma[3] = 4
+//   var t = zeros_nd(forma)
+//
+// ...ou usar os atalhos shape2/shape3/shape4/shape5 (e idx2/idx3/idx4/idx5,
+// idênticos, só pra deixar claro na leitura que aquilo é um índice e não um
+// shape) logo abaixo, que montam o mesmo array sem precisar declarar e
+// preencher na mão.
+//
+// Exemplo completo — tensor 2x3x4:
+//
+//   import "stdlib/tensor.ay"
+//
+//   fn main() {
+//       var t = zeros_nd(shape3(2, 3, 4))
+//       set_nd(t, idx3(0, 1, 2), 99)
+//       print(get_nd(t, idx3(0, 1, 2)))   // 99
+//       print(size_nd(t))                 // 24
+//       print_nd(t)                       // [[[0,...],...],...]
+//       return 0
+//   }
+//
+// Como importar:
+//   import "stdlib/tensor.ay"
+
+// --- Atalhos para montar descritores (shape / índice) sem varargs ---
+
+fn shape1(a: i64) -> i64 {
+    var s = array(2)
+    s[0] = 1
+    s[1] = a
+    return s
+}
+
+fn shape2(a: i64, b: i64) -> i64 {
+    var s = array(3)
+    s[0] = 2
+    s[1] = a
+    s[2] = b
+    return s
+}
+
+fn shape3(a: i64, b: i64, c: i64) -> i64 {
+    var s = array(4)
+    s[0] = 3
+    s[1] = a
+    s[2] = b
+    s[3] = c
+    return s
+}
+
+fn shape4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    var s = array(5)
+    s[0] = 4
+    s[1] = a
+    s[2] = b
+    s[3] = c
+    s[4] = d
+    return s
+}
+
+fn shape5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    var s = array(6)
+    s[0] = 5
+    s[1] = a
+    s[2] = b
+    s[3] = c
+    s[4] = d
+    s[5] = e
+    return s
+}
+
+fn idx1(a: i64) -> i64 { return shape1(a) }
+fn idx2(a: i64, b: i64) -> i64 { return shape2(a, b) }
+fn idx3(a: i64, b: i64, c: i64) -> i64 { return shape3(a, b, c) }
+fn idx4(a: i64, b: i64, c: i64, d: i64) -> i64 { return shape4(a, b, c, d) }
+fn idx5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 { return shape5(a, b, c, d, e) }
+
+// --- Núcleo interno: validação de shape, tamanho total e alocação ---
+
+fn check_shape_nd(shape: i64) {
+    var d = shape[0]
+    if d <= 0 {
+        throw "tensor: shape precisa ter pelo menos 1 dimensao"
+    }
+    var i = 1
+    while i <= d {
+        if shape[i] <= 0 {
+            throw "tensor: toda dimensao do shape deve ser maior que zero"
+        }
+        i = i + 1
+    }
+}
+
+fn size_from_shape_nd(shape: i64) -> i64 {
+    var d = shape[0]
+    var sz = 1
+    var i = 1
+    while i <= d {
+        sz = sz * shape[i]
+        i = i + 1
+    }
+    return sz
+}
+
+fn alloc_nd(shape: i64) -> i64 {
+    check_shape_nd(shape)
+    var d = shape[0]
+    var sz = size_from_shape_nd(shape)
+    var t = array(2 * d + 1 + sz)
+    t[0] = d
+    var i = 0
+    while i < d {
+        t[1 + i] = shape[1 + i]
+        i = i + 1
+    }
+    // strides row-major (C-order): stride[d-1] = 1; stride[k] = stride[k+1] * shape[k+1]
+    t[1 + d + (d - 1)] = 1
+    var k = d - 2
+    while k >= 0 {
+        t[1 + d + k] = t[1 + d + k + 1] * t[1 + k + 1]
+        k = k - 1
+    }
+    return t
+}
+
+// --- Metadados ---
+
+fn ndim_nd(t: i64) -> i64 {
+    return t[0]
+}
+
+fn size_nd(t: i64) -> i64 {
+    var d = t[0]
+    var sz = 1
+    var i = 1
+    while i <= d {
+        sz = sz * t[i]
+        i = i + 1
+    }
+    return sz
+}
+
+fn dim_nd(t: i64, axis: i64) -> i64 {
+    var d = t[0]
+    if axis < 0 { throw "dim_nd: eixo negativo" }
+    if axis >= d { throw "dim_nd: eixo fora dos limites" }
+    return t[1 + axis]
+}
+
+fn shape_nd(t: i64) -> i64 {
+    var d = t[0]
+    var s = array(d + 1)
+    s[0] = d
+    var i = 1
+    while i <= d {
+        s[i] = t[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn strides_nd(t: i64) -> i64 {
+    var d = t[0]
+    var s = array(d + 1)
+    s[0] = d
+    var i = 0
+    while i < d {
+        s[1 + i] = t[1 + d + i]
+        i = i + 1
+    }
+    return s
+}
+
+// --- Criação ---
+
+fn zeros_nd(shape: i64) -> i64 {
+    var t = alloc_nd(shape)
+    var d = t[0]
+    var sz = size_nd(t)
+    var start = 2 * d + 1
+    var end = start + sz
+    var i = start
+    while i < end {
+        t[i] = 0
+        i = i + 1
+    }
+    return t
+}
+
+fn ones_nd(shape: i64) -> i64 {
+    var t = alloc_nd(shape)
+    var d = t[0]
+    var sz = size_nd(t)
+    var start = 2 * d + 1
+    var end = start + sz
+    var i = start
+    while i < end {
+        t[i] = 1
+        i = i + 1
+    }
+    return t
+}
+
+fn full_nd(shape: i64, val: i64) -> i64 {
+    var t = alloc_nd(shape)
+    var d = t[0]
+    var sz = size_nd(t)
+    var start = 2 * d + 1
+    var end = start + sz
+    var i = start
+    while i < end {
+        t[i] = val
+        i = i + 1
+    }
+    return t
+}
+
+fn copy_nd(t: i64) -> i64 {
+    var d = t[0]
+    var sz = size_nd(t)
+    var total = 2 * d + 1 + sz
+    var res = array(total)
+    var i = 0
+    while i < total {
+        res[i] = t[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn fill_nd(t: i64, val: i64) {
+    var d = t[0]
+    var sz = size_nd(t)
+    var start = 2 * d + 1
+    var end = start + sz
+    var i = start
+    while i < end {
+        t[i] = val
+        i = i + 1
+    }
+}
+
+// --- Índice multi-dimensional <-> offset plano ---
+
+fn flat_index_nd(t: i64, idx: i64) -> i64 {
+    var d = t[0]
+    if idx[0] != d {
+        throw "tensor: numero de indices nao bate com o numero de dimensoes"
+    }
+    var offset = 0
+    var i = 0
+    while i < d {
+        var ix = idx[1 + i]
+        var dim = t[1 + i]
+        if ix < 0 {
+            throw "tensor: indice negativo"
+        }
+        if ix >= dim {
+            throw "tensor: indice fora dos limites"
+        }
+        offset = offset + ix * t[1 + d + i]
+        i = i + 1
+    }
+    return 2 * d + 1 + offset
+}
+
+fn get_nd(t: i64, idx: i64) -> i64 {
+    return t[flat_index_nd(t, idx)]
+}
+
+fn set_nd(t: i64, idx: i64, val: i64) {
+    t[flat_index_nd(t, idx)] = val
+}
+
+// --- Operações elementwise (exigem o mesmo shape) ---
+
+fn check_dims_nd(t1: i64, t2: i64, op_name: str) {
+    var d1 = t1[0]
+    var d2 = t2[0]
+    if d1 != d2 {
+        throw op_name + ": numero de dimensoes incompativel"
+    }
+    var i = 1
+    while i <= d1 {
+        if t1[i] != t2[i] {
+            throw op_name + ": shape incompativel"
+        }
+        i = i + 1
+    }
+}
+
+fn add_nd(t1: i64, t2: i64) -> i64 {
+    check_dims_nd(t1, t2, "add_nd")
+    var res = copy_nd(t1)
+    var d = t1[0]
+    var start = 2 * d + 1
+    var end = start + size_nd(t1)
+    var i = start
+    while i < end {
+        res[i] = t1[i] + t2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn sub_nd(t1: i64, t2: i64) -> i64 {
+    check_dims_nd(t1, t2, "sub_nd")
+    var res = copy_nd(t1)
+    var d = t1[0]
+    var start = 2 * d + 1
+    var end = start + size_nd(t1)
+    var i = start
+    while i < end {
+        res[i] = t1[i] - t2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn mul_nd(t1: i64, t2: i64) -> i64 {
+    check_dims_nd(t1, t2, "mul_nd")
+    var res = copy_nd(t1)
+    var d = t1[0]
+    var start = 2 * d + 1
+    var end = start + size_nd(t1)
+    var i = start
+    while i < end {
+        res[i] = t1[i] * t2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn div_nd(t1: i64, t2: i64) -> i64 {
+    check_dims_nd(t1, t2, "div_nd")
+    var res = copy_nd(t1)
+    var d = t1[0]
+    var start = 2 * d + 1
+    var end = start + size_nd(t1)
+    var i = start
+    while i < end {
+        if t2[i] == 0 {
+            throw "div_nd: divisao por zero"
+        }
+        res[i] = t1[i] / t2[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn scale_nd(t: i64, factor: i64) -> i64 {
+    var res = copy_nd(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + size_nd(t)
+    var i = start
+    while i < end {
+        res[i] = t[i] * factor
+        i = i + 1
+    }
+    return res
+}
+
+// --- Reduções ---
+
+fn sum_nd(t: i64) -> i64 {
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + size_nd(t)
+    var s = 0
+    var i = start
+    while i < end {
+        s = s + t[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn prod_nd(t: i64) -> i64 {
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + size_nd(t)
+    var p = 1
+    var i = start
+    while i < end {
+        p = p * t[i]
+        i = i + 1
+    }
+    return p
+}
+
+fn amin_nd(t: i64) -> i64 {
+    var d = t[0]
+    var sz = size_nd(t)
+    if sz == 0 {
+        throw "amin_nd: tensor vazio"
+    }
+    var start = 2 * d + 1
+    var m = t[start]
+    var end = start + sz
+    var i = start + 1
+    while i < end {
+        if t[i] < m {
+            m = t[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn amax_nd(t: i64) -> i64 {
+    var d = t[0]
+    var sz = size_nd(t)
+    if sz == 0 {
+        throw "amax_nd: tensor vazio"
+    }
+    var start = 2 * d + 1
+    var m = t[start]
+    var end = start + sz
+    var i = start + 1
+    while i < end {
+        if t[i] > m {
+            m = t[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn mean_nd(t: i64) -> double {
+    var sz = size_nd(t)
+    if sz == 0 {
+        throw "mean_nd: tensor vazio"
+    }
+    var s_double = sum_nd(t) * 1.0
+    var n_double = sz * 1.0
+    return s_double / n_double
+}
+
+fn variance_nd(t: i64) -> double {
+    var sz = size_nd(t)
+    if sz == 0 {
+        throw "variance_nd: tensor vazio"
+    }
+    var m = mean_nd(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + sz
+    var sum_sq = 0.0
+    var i = start
+    while i < end {
+        var diff = (t[i] * 1.0) - m
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    var n_double = sz * 1.0
+    return sum_sq / n_double
+}
+
+fn std_nd(t: i64) -> double {
+    return sqrt(variance_nd(t))
+}
+
+// --- Reformatação ---
+
+fn reshape_nd(t: i64, new_shape: i64) -> i64 {
+    var sz = size_nd(t)
+    var new_sz = size_from_shape_nd(new_shape)
+    if sz != new_sz {
+        throw "reshape_nd: numero total de elementos precisa ser o mesmo"
+    }
+    var res = alloc_nd(new_shape)
+    var d = t[0]
+    var start = 2 * d + 1
+    var new_d = res[0]
+    var new_start = 2 * new_d + 1
+    var i = 0
+    while i < sz {
+        res[new_start + i] = t[start + i]
+        i = i + 1
+    }
+    return res
+}
+
+// Achata o tensor pra um array 1D no estilo numares.ay (arr[0] = n,
+// arr[1..n] = valores), preservando a ordem row-major dos dados.
+fn flatten_nd(t: i64) -> i64 {
+    var d = t[0]
+    var sz = size_nd(t)
+    var start = 2 * d + 1
+    var res = array(sz + 1)
+    res[0] = sz
+    var i = 0
+    while i < sz {
+        res[1 + i] = t[start + i]
+        i = i + 1
+    }
+    return res
+}
+
+// Monta um tensor a partir de um array 1D estilo numares.ay (arr[0] = n,
+// arr[1..n] = valores) mais um shape, na ordem row-major.
+fn from_flat_nd(arr: i64, shape: i64) -> i64 {
+    var n = arr[0]
+    var sz = size_from_shape_nd(shape)
+    if n != sz {
+        throw "from_flat_nd: tamanho do array nao bate com o shape"
+    }
+    var t = alloc_nd(shape)
+    var d = t[0]
+    var start = 2 * d + 1
+    var i = 0
+    while i < sz {
+        t[start + i] = arr[1 + i]
+        i = i + 1
+    }
+    return t
+}
+
+// Transposição genérica N-d: perm é um descritor (perm[0] = ndim,
+// perm[1..ndim] = permutação de 0..ndim-1) onde perm[i] diz de qual eixo
+// da ORIGEM vem o eixo i do RESULTADO. Ex.: transpose_nd(t, idx2(1, 0))
+// troca as duas dimensões de uma matriz 2D representada como tensor.
+fn transpose_nd(t: i64, perm: i64) -> i64 {
+    var d = t[0]
+    if perm[0] != d {
+        throw "transpose_nd: tamanho da permutacao nao bate com o ndim"
+    }
+    var new_shape = array(d + 1)
+    new_shape[0] = d
+    var chk = array(d)
+    var i = 0
+    while i < d {
+        chk[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < d {
+        var p = perm[1 + i]
+        if p < 0 { throw "transpose_nd: eixo negativo na permutacao" }
+        if p >= d { throw "transpose_nd: eixo fora dos limites na permutacao" }
+        if chk[p] != 0 { throw "transpose_nd: eixo repetido na permutacao" }
+        chk[p] = 1
+        new_shape[1 + i] = t[1 + p]
+        i = i + 1
+    }
+    var res = alloc_nd(new_shape)
+    var sz = size_nd(t)
+    var src_start = 2 * d + 1
+    var dst_start = 2 * d + 1
+    // Percorre cada posição linear do RESULTADO (row-major), decodifica o
+    // índice multi-dimensional usando as strides do resultado, mapeia cada
+    // eixo pro eixo correspondente na origem via perm e acumula o offset
+    // na origem usando as strides de t.
+    var lin = 0
+    while lin < sz {
+        var rem = lin
+        var src_offset = 0
+        var k = 0
+        while k < d {
+            var out_stride_k = res[1 + d + k]
+            var comp = rem / out_stride_k
+            rem = rem % out_stride_k
+            var src_axis = perm[1 + k]
+            src_offset = src_offset + comp * t[1 + d + src_axis]
+            k = k + 1
+        }
+        res[dst_start + lin] = t[src_start + src_offset]
+        lin = lin + 1
+    }
+    return res
+}
+
+// --- Impressão ---
+
+fn print_shape_nd(t: i64) {
+    var d = t[0]
+    var s = "("
+    var i = 0
+    while i < d {
+        s = s + str(t[1 + i])
+        if i < d - 1 {
+            s = s + ", "
+        }
+        i = i + 1
+    }
+    s = s + ")"
+    print(s)
+}
+
+fn print_nd_rec(t: i64, axis: i64, offset: i64) -> str {
+    var d = t[0]
+    var dim = t[1 + axis]
+    var stride = t[1 + d + axis]
+    var s = "["
+    var i = 0
+    while i < dim {
+        if axis == d - 1 {
+            s = s + str(t[2 * d + 1 + offset + i * stride])
+        } else {
+            s = s + print_nd_rec(t, axis + 1, offset + i * stride)
+        }
+        if i < dim - 1 {
+            s = s + ", "
+        }
+        i = i + 1
+    }
+    s = s + "]"
+    return s
+}
+
+// Imprime o tensor com colchetes aninhados de acordo com o shape, tipo
+// print(numpy_array) — funciona pra qualquer numero de dimensoes.
+fn print_nd(t: i64) {
+    print(print_nd_rec(t, 0, 0))
+}

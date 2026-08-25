@@ -181,6 +181,43 @@ bibliotecas em `stdlib/`:
       return 0
   }
   ```
+- `stdlib/tensor.ay` — tensores dinâmicos **N-dimensionais** (2D, 3D, 4D...,
+  qualquer número de dimensões decidido em tempo de execução). Como aresY só
+  tem `array(n)` de 1 dimensão (e nenhuma função variádica), a biblioteca
+  representa o tensor como um array plano com um pequeno cabeçalho:
+  `t[0]` = número de dimensões, seguido pelo shape e pelas strides
+  (pré-calculadas, indexação O(1)), com os dados guardados em ordem
+  row-major logo depois. Shape e índice multi-dimensional são passados como
+  "descritores" — arrays no mesmo estilo do `numares.ay` (`desc[0]` =
+  quantidade, `desc[1..n]` = valores) — montados com os atalhos `shapeN`/
+  `idxN` (`N` de 1 a 5) pra não precisar declarar e preencher um array na
+  mão. Principais funções: criação (`zeros_nd`, `ones_nd`, `full_nd`,
+  `copy_nd`), metadados (`ndim_nd`, `size_nd`, `dim_nd`, `shape_nd`,
+  `strides_nd`), acesso (`get_nd`, `set_nd`, com checagem de limites),
+  elementwise (`add_nd`, `sub_nd`, `mul_nd`, `div_nd`, `scale_nd`), reduções
+  (`sum_nd`, `prod_nd`, `amin_nd`, `amax_nd`, `mean_nd`, `variance_nd`,
+  `std_nd`), reformatação (`reshape_nd`, `flatten_nd`, `from_flat_nd`,
+  `transpose_nd` com permutação arbitrária de eixos) e impressão
+  (`print_nd`, com colchetes aninhados de acordo com o shape). Exemplo:
+  ```
+  import "stdlib/tensor.ay"
+
+  fn main() {
+      var t = zeros_nd(shape3(2, 3, 4))   // tensor 2x3x4, tudo zero
+      set_nd(t, idx3(0, 1, 2), 99)
+      print(get_nd(t, idx3(0, 1, 2)))      // 99
+      print(size_nd(t))                    // 24 (2*3*4)
+
+      var a = full_nd(shape2(2, 3), 5)
+      var b = ones_nd(shape2(2, 3))
+      print_nd(add_nd(a, b))                // [[6, 6, 6], [6, 6, 6]]
+      print(mean_nd(a))                     // 5.0
+
+      var at = transpose_nd(a, idx2(1, 0))  // transposta (3x2)
+      print_shape_nd(at)                    // (3, 2)
+      return 0
+  }
+  ```
 
 
 ## Gerenciador de pacotes (aresy install)
