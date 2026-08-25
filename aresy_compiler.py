@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -734,6 +734,7 @@ class CodeGen:
             # errado) e depois batia de frente com o tipo real no codegen.
             return self.functions[node.name].get("ret", "i64")
         if isinstance(node, BinOp): return self._guess_type(node.left)
+        if isinstance(node, UnaryOp): return self._guess_type(node.operand)
         return "i64"
 
     _STR_BUILTIN_FIRST_ARG = {"upper", "lower", "len", "substr", "char_at"}
