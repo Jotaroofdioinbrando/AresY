@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -1365,6 +1365,27 @@ class CodeGen:
 
     def gen_call(self, node, env, lines, uid):
         name = node.name
+        if name == "to_raw":
+            # reinterpreta os bits de um double como i64 (não converte valor,
+            # preserva o padrão de bits) — pra poder guardar double dentro de
+            # um array, que só armazena i64 por slot.
+            if len(node.args) != 1:
+                raise CompileError("'to_raw' espera 1 argumento: to_raw(double)")
+            t, v = self.gen_expr(node.args[0], env, lines)
+            v = self.cast(lines, t, v, "double")
+            lines.append(f"  %traw_{uid} = bitcast double {v} to i64")
+            return "i64", f"%traw_{uid}"
+
+        if name == "from_raw":
+            # inverso de to_raw: reinterpreta os bits de um i64 (lido de um
+            # array) de volta como double.
+            if len(node.args) != 1:
+                raise CompileError("'from_raw' espera 1 argumento: from_raw(i64)")
+            t, v = self.gen_expr(node.args[0], env, lines)
+            v = self.cast(lines, t, v, "i64")
+            lines.append(f"  %fraw_{uid} = bitcast i64 {v} to double")
+            return "double", f"%fraw_{uid}"
+
         if name == "sqrt":
             t, v = self.gen_expr(node.args[0], env, lines)
             v = self.cast(lines, t, v, "double")
