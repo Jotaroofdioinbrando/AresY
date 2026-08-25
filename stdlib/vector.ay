@@ -1,0 +1,314 @@
+// stdlib/vector.ay — Vetor dinâmico (array que cresce) para aresY.
+//
+// aresY só tem array(n) de tamanho FIXO: uma vez alocado, não dá pra
+// crescer o mesmo array. Este módulo resolve isso do jeito clássico
+// (o mesmo do realloc em C): quando precisa de mais espaço, aloca um
+// array NOVO maior, copia os dados antigos e passa a usar o novo.
+//
+// Por causa disso, toda operação que PODE precisar crescer o vetor
+// (vec_push, vec_insert, vec_reserve, vec_grow...) devolve o vetor
+// atualizado — e quem chama precisa reatribuir a variável:
+//
+//   var v = vec_new(4)
+//   v = vec_push(v, 10)     // <- IMPORTANTE: sempre reatribua o retorno
+//   v = vec_push(v, 20)
+//   print(vec_get(v, 0))     // 10
+//
+// Operações que só mexem no CONTEÚDO sem nunca precisar realocar
+// (vec_set, vec_pop, vec_clear, vec_fill) não precisam de reatribuição,
+// mas reatribuir sempre é hábito seguro e não custa nada.
+//
+// Layout (tudo em i64, array plano):
+//   v[0]            = length   (quantos elementos estão em uso)
+//   v[1]            = capacity (quantos elementos cabem sem realocar)
+//   v[2 .. 2+cap-1] = dados
+//
+// Como importar:
+//   import "stdlib/vector.ay"
+
+// --- Criação ---
+
+fn vec_new(capacity: i64) -> i64 {
+    var cap = capacity
+    if cap < 1 {
+        cap = 1
+    }
+    var v = array(2 + cap)
+    v[0] = 0
+    v[1] = cap
+    return v
+}
+
+fn vec_len(v: i64) -> i64 {
+    return v[0]
+}
+
+fn vec_cap(v: i64) -> i64 {
+    return v[1]
+}
+
+fn vec_is_empty(v: i64) -> i64 {
+    if v[0] == 0 {
+        return 1
+    }
+    return 0
+}
+
+// --- Acesso ---
+
+fn vec_get(v: i64, i: i64) -> i64 {
+    if i < 0 {
+        throw "vec_get: indice negativo"
+    }
+    if i >= v[0] {
+        throw "vec_get: indice fora dos limites"
+    }
+    return v[2 + i]
+}
+
+fn vec_set(v: i64, i: i64, val: i64) {
+    if i < 0 {
+        throw "vec_set: indice negativo"
+    }
+    if i >= v[0] {
+        throw "vec_set: indice fora dos limites"
+    }
+    v[2 + i] = val
+}
+
+fn vec_front(v: i64) -> i64 {
+    if v[0] == 0 {
+        throw "vec_front: vetor vazio"
+    }
+    return v[2]
+}
+
+fn vec_back(v: i64) -> i64 {
+    if v[0] == 0 {
+        throw "vec_back: vetor vazio"
+    }
+    return v[2 + v[0] - 1]
+}
+
+// --- Realocação (uso interno, mas exposta pra quem quiser controlar) ---
+
+// Devolve um vetor com a MESMA length mas capacity >= new_capacity.
+// Se já tiver capacidade suficiente, devolve o próprio v sem copiar nada.
+fn vec_reserve(v: i64, new_capacity: i64) -> i64 {
+    if new_capacity <= v[1] {
+        return v
+    }
+    var res = array(2 + new_capacity)
+    res[0] = v[0]
+    res[1] = new_capacity
+    var n = v[0]
+    var i = 0
+    while i < n {
+        res[2 + i] = v[2 + i]
+        i = i + 1
+    }
+    return res
+}
+
+// --- Inserção / remoção ---
+
+fn vec_push(v: i64, val: i64) -> i64 {
+    var res = v
+    if res[0] >= res[1] {
+        var new_cap = res[1] * 2
+        res = vec_reserve(res, new_cap)
+    }
+    res[2 + res[0]] = val
+    res[0] = res[0] + 1
+    return res
+}
+
+// Remove e devolve o último elemento. Não precisa reatribuir (nunca realoca).
+fn vec_pop(v: i64) -> i64 {
+    if v[0] == 0 {
+        throw "vec_pop: vetor vazio"
+    }
+    var last = v[2 + v[0] - 1]
+    v[0] = v[0] - 1
+    return last
+}
+
+// Insere val na posição i, empurrando os elementos seguintes pra frente.
+fn vec_insert(v: i64, i: i64, val: i64) -> i64 {
+    if i < 0 {
+        throw "vec_insert: indice negativo"
+    }
+    if i > v[0] {
+        throw "vec_insert: indice fora dos limites"
+    }
+    var res = v
+    if res[0] >= res[1] {
+        var new_cap = res[1] * 2
+        res = vec_reserve(res, new_cap)
+    }
+    var j = res[0]
+    while j > i {
+        res[2 + j] = res[2 + j - 1]
+        j = j - 1
+    }
+    res[2 + i] = val
+    res[0] = res[0] + 1
+    return res
+}
+
+// Remove o elemento da posição i, puxando os seguintes pra trás.
+// Devolve o valor removido. Não precisa reatribuir (nunca realoca).
+fn vec_remove(v: i64, i: i64) -> i64 {
+    if i < 0 {
+        throw "vec_remove: indice negativo"
+    }
+    if i >= v[0] {
+        throw "vec_remove: indice fora dos limites"
+    }
+    var removed = v[2 + i]
+    var n = v[0]
+    var j = i
+    while j < n - 1 {
+        v[2 + j] = v[2 + j + 1]
+        j = j + 1
+    }
+    v[0] = v[0] - 1
+    return removed
+}
+
+// Esvazia o vetor (mantém a capacidade alocada).
+fn vec_clear(v: i64) {
+    v[0] = 0
+}
+
+// --- Combinação ---
+
+// Acrescenta todos os elementos de "other" ao final de v.
+fn vec_extend(v: i64, other: i64) -> i64 {
+    var res = v
+    var n = other[0]
+    var need = res[0] + n
+    if need > res[1] {
+        var new_cap = res[1] * 2
+        if new_cap < need {
+            new_cap = need
+        }
+        res = vec_reserve(res, new_cap)
+    }
+    var i = 0
+    while i < n {
+        res[2 + res[0]] = other[2 + i]
+        res[0] = res[0] + 1
+        i = i + 1
+    }
+    return res
+}
+
+// Devolve um vetor NOVO com os elementos de a seguidos dos de b
+// (não modifica a nem b).
+fn vec_concat(a: i64, b: i64) -> i64 {
+    var total = a[0] + b[0]
+    var res = vec_new(total)
+    res = vec_extend(res, a)
+    res = vec_extend(res, b)
+    return res
+}
+
+// --- Utilidades ---
+
+fn vec_copy(v: i64) -> i64 {
+    var res = array(2 + v[1])
+    var total = 2 + v[1]
+    var i = 0
+    while i < total {
+        res[i] = v[i]
+        i = i + 1
+    }
+    return res
+}
+
+fn vec_fill(v: i64, val: i64) {
+    var n = v[0]
+    var i = 0
+    while i < n {
+        v[2 + i] = val
+        i = i + 1
+    }
+}
+
+fn vec_sum(v: i64) -> i64 {
+    var n = v[0]
+    var total = 0
+    var i = 0
+    while i < n {
+        total = total + v[2 + i]
+        i = i + 1
+    }
+    return total
+}
+
+fn vec_contains(v: i64, val: i64) -> i64 {
+    var n = v[0]
+    var i = 0
+    while i < n {
+        if v[2 + i] == val {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn vec_index_of(v: i64, val: i64) -> i64 {
+    var n = v[0]
+    var i = 0
+    while i < n {
+        if v[2 + i] == val {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// --- Interoperabilidade com arrays estilo numares.ay / tensor.ay ---
+// (arr[0] = n, arr[1..n] = valores — sem capacidade, tamanho fixo)
+
+fn vec_to_array(v: i64) -> i64 {
+    var n = v[0]
+    var res = array(n + 1)
+    res[0] = n
+    var i = 0
+    while i < n {
+        res[1 + i] = v[2 + i]
+        i = i + 1
+    }
+    return res
+}
+
+fn vec_from_array(arr: i64) -> i64 {
+    var n = arr[0]
+    var v = vec_new(n)
+    var i = 0
+    while i < n {
+        v[2 + i] = arr[1 + i]
+        i = i + 1
+    }
+    v[0] = n
+    return v
+}
+
+fn print_vec(v: i64) {
+    var n = v[0]
+    var s = "["
+    var i = 0
+    while i < n {
+        s = s + str(v[2 + i])
+        if i < n - 1 {
+            s = s + ", "
+        }
+        i = i + 1
+    }
+    s = s + "]"
+    print(s)
+}

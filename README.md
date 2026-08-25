@@ -218,6 +218,93 @@ bibliotecas em `stdlib/`:
       return 0
   }
   ```
+- `stdlib/vector.ay` — vetor dinâmico: um array de `i64` que **cresce**
+  sozinho. O `array(n)` nativo do aresY tem tamanho fixo (não dá pra
+  realocar); este módulo resolve isso do jeito clássico do `realloc`
+  em C — quando falta espaço, aloca um array novo maior (dobrando a
+  capacidade), copia os dados antigos pra ele e passa a usar o novo.
+  Por causa disso, toda operação que **pode** precisar crescer o
+  vetor (`vec_push`, `vec_insert`, `vec_reserve`, `vec_extend`,
+  `vec_concat`) devolve o vetor atualizado — **sempre reatribua o
+  retorno**: `v = vec_push(v, x)`. Operações que só mexem no conteúdo
+  sem nunca realocar (`vec_set`, `vec_pop`, `vec_remove`, `vec_clear`,
+  `vec_fill`) não precisam de reatribuição. Principais funções:
+  criação (`vec_new`), metadados (`vec_len`, `vec_cap`, `vec_is_empty`),
+  acesso (`vec_get`, `vec_set`, `vec_front`, `vec_back`, com checagem de
+  limites), inserção/remoção (`vec_push`, `vec_pop`, `vec_insert`,
+  `vec_remove`, `vec_clear`), combinação (`vec_extend`, `vec_concat`),
+  utilidades (`vec_copy`, `vec_fill`, `vec_sum`, `vec_contains`,
+  `vec_index_of`), interoperabilidade com arrays estilo `numares.ay`
+  (`vec_to_array`, `vec_from_array`) e impressão (`print_vec`). Exemplo:
+  ```
+  import "stdlib/vector.ay"
+
+  fn main() {
+      var v = vec_new(2)          // capacidade inicial 2
+      var i = 0
+      while i < 10 {
+          v = vec_push(v, i * i)  // cresce sozinho (2 -> 4 -> 8 -> 16)
+          i = i + 1
+      }
+      print_vec(v)                 // [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+      print(vec_len(v))            // 10
+      print(vec_cap(v))            // 16
+
+      var x = vec_pop(v)           // 81 (não precisa reatribuir)
+      v = vec_insert(v, 2, 999)    // [0, 1, 999, 4, 9, ...]
+      return 0
+  }
+  ```
+- `stdlib/tensor_d.ay` — tensores dinâmicos N-dimensionais de **ponto
+  flutuante** (`double`) — a versão "de verdade" do `tensor.ay` (que só
+  guarda `i64`), pensada pra redes tipo Transformer (matmul, attention,
+  softmax, layer_norm) e simulação numérica tipo Brian2. Mesmo layout do
+  `tensor.ay` (cabeçalho com ndim/shape/strides), só que cada slot de
+  dado guarda `to_raw(double)` em vez do `i64` puro; reaproveita
+  `shape1..shape5`/`idx1..idx5` do `tensor.ay` (que já vem importado
+  junto). **Não tem autograd** — é um motor de forward pass, não de
+  treino. Principais funções: criação (`t_zeros`, `t_ones`, `t_full`,
+  `t_copy`), acesso (`t_get`/`t_set` com descritor, e os atalhos mais
+  rápidos `t_get1`/`t_set1`, `t_get2`/`t_set2`, `t_get3`/`t_set3` pra
+  1D/2D/3D sem montar descritor a cada chamada), elemento a elemento
+  (`t_add`, `t_sub`, `t_mul`, `t_div`, `t_scale`, `t_add_scalar`, `t_neg`),
+  reduções (`t_sum`, `t_prod`, `t_min`, `t_max`, `t_mean`, `t_variance`,
+  `t_std`), operações de matriz 2D (`t_matmul`, `t_transpose2`, `t_row`,
+  `t_add_row_bias` — o único broadcasting que a lib faz, de propósito —,
+  `t_sum_axis1`, `t_max_axis1`), ativações (`t_relu`, `t_sigmoid`,
+  `t_tanh`, `t_gelu`, `t_exp`), os blocos prontos de um Transformer
+  (`t_softmax_row`, `t_layer_norm`, `t_linear` = `x @ w + b`,
+  `t_attention` = scaled dot-product attention completa), impressão
+  (`t_print`, `t_print_shape`) e uma lista dinâmica de `double` que
+  cresce sozinha — o `dlist` (`dlist_new`, `dlist_push`, `dlist_get`,
+  `dlist_to_tensor`...) — útil pra ir acumulando algo de tamanho
+  desconhecido de antemão (embeddings sendo montados, trem de spikes
+  de uma simulação). Exemplo:
+  ```
+  import "stdlib/tensor_d.ay"
+
+  fn main() {
+      var x = t_full(shape2(2, 3), 1.5)
+      var w = t_ones(shape2(3, 4))
+      var b = t_zeros(shape1(4))
+      var y = t_linear(x, w, b)      // y = x @ w + b
+      t_print(y)
+
+      var q = t_full(shape2(2, 4), 0.5)
+      var k = t_full(shape2(2, 4), 0.3)
+      var v = t_full(shape2(2, 4), 2.0)
+      t_print(t_attention(q, k, v))   // scaled dot-product attention
+
+      var l = dlist_new(2)            // lista de double que cresce
+      var i = 0
+      while i < 5 {
+          dlist_push(l, i * 1.5)       // não precisa reatribuir "l"
+          i = i + 1
+      }
+      t_print(dlist_to_tensor(l))      // [0, 1.5, 3, 4.5, 6]
+      return 0
+  }
+  ```
 
 
 ## Gerenciador de pacotes (aresy install)

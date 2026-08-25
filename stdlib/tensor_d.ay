@@ -1,0 +1,921 @@
+// stdlib/tensor_d.ay — Tensores dinâmicos N-dimensionais de PONTO
+// FLUTUANTE (double) para aresY. É a versão "de verdade" do tensor.ay
+// (que guarda i64) — pensada pra dar pra fazer tanto redes tipo
+// Transformer (matmul, softmax, layer_norm, attention) quanto
+// simulação numérica tipo Brian2 (junto com stdlib/snn.ay).
+//
+// Layout (mesma ideia do tensor.ay, só que cada slot de dado guarda
+// to_raw(double) em vez do i64 puro):
+//
+//   t[0]            = ndim (D)
+//   t[1 .. D]       = shape:   t[1+d]   = tamanho da dimensao d
+//   t[D+1 .. 2*D]   = strides: t[1+D+d] = passo da dimensao d (row-major)
+//   t[2*D+1 .. fim] = dados (to_raw(double) por slot), row-major
+//
+// "Descritores" de shape/índice são os MESMOS do tensor.ay (array
+// i64 puro: desc[0] = quantidade, desc[1..] = valores) — por isso
+// esse arquivo importa tensor.ay, só pra reusar shape1..shape5/
+// idx1..idx5 sem duplicar código.
+//
+//   import "stdlib/tensor_d.ay"
+//
+//   fn main() {
+//       var x = t_full(shape2(2, 3), 1.5)
+//       var w = t_ones(shape2(3, 4))
+//       var b = t_zeros(shape1(4))
+//       var y = t_linear(x, w, b)      // y = x @ w + b
+//       t_print(y)
+//       return 0
+//   }
+//
+// Não tem autograd (backprop) aqui — isso é um motor de FORWARD PASS:
+// dá pra montar e RODAR um bloco de atenção/MLP, não treinar do zero
+// com gradiente automático. Também não tem broadcasting geral (só o
+// caso específico de somar um vetor 1D em cada linha de uma matriz,
+// via t_add_row_bias, que é o que um linear layer precisa).
+
+import "tensor.ay"
+
+fn check_shape_d(shape: i64) {
+    var d = shape[0]
+    if d <= 0 {
+        throw "tensor_d: shape precisa ter pelo menos 1 dimensao"
+    }
+    var i = 1
+    while i <= d {
+        if shape[i] <= 0 {
+            throw "tensor_d: toda dimensao do shape deve ser maior que zero"
+        }
+        i = i + 1
+    }
+}
+
+fn t_size_from_shape(shape: i64) -> i64 {
+    var d = shape[0]
+    var sz = 1
+    var i = 1
+    while i <= d {
+        sz = sz * shape[i]
+        i = i + 1
+    }
+    return sz
+}
+
+fn t_alloc(shape: i64) -> i64 {
+    check_shape_d(shape)
+    var d = shape[0]
+    var sz = t_size_from_shape(shape)
+    var t = array(2 * d + 1 + sz)
+    t[0] = d
+    var i = 0
+    while i < d {
+        t[1 + i] = shape[1 + i]
+        i = i + 1
+    }
+    // strides row-major (C-order): stride[d-1] = 1; stride[k] = stride[k+1] * shape[k+1]
+    t[1 + d + (d - 1)] = 1
+    var k = d - 2
+    while k >= 0 {
+        t[1 + d + k] = t[1 + d + k + 1] * t[1 + k + 1]
+        k = k - 1
+    }
+    return t
+}
+
+fn t_ndim(t: i64) -> i64 {
+    return t[0]
+}
+
+fn t_size(t: i64) -> i64 {
+    var d = t[0]
+    var sz = 1
+    var i = 1
+    while i <= d {
+        sz = sz * t[i]
+        i = i + 1
+    }
+    return sz
+}
+
+fn t_dim(t: i64, axis: i64) -> i64 {
+    var d = t[0]
+    if axis < 0 { throw "t_dim: eixo negativo" }
+    if axis >= d { throw "t_dim: eixo fora dos limites" }
+    return t[1 + axis]
+}
+
+fn t_shape(t: i64) -> i64 {
+    var d = t[0]
+    var s = array(d + 1)
+    s[0] = d
+    var i = 1
+    while i <= d {
+        s[i] = t[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn t_strides(t: i64) -> i64 {
+    var d = t[0]
+    var s = array(d + 1)
+    s[0] = d
+    var i = 0
+    while i < d {
+        s[1 + i] = t[1 + d + i]
+        i = i + 1
+    }
+    return s
+}
+
+fn t_copy(t: i64) -> i64 {
+    var d = t[0]
+    var sz = t_size(t)
+    var total = 2 * d + 1 + sz
+    var res = array(total)
+    var i = 0
+    while i < total {
+        res[i] = t[i]
+        i = i + 1
+    }
+    return res
+}
+
+// ============================================================
+// CRIAÇÃO / PREENCHIMENTO
+// ============================================================
+
+fn t_fill(t: i64, v: double) {
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var raw = to_raw(v)
+    var i = start
+    while i < end {
+        t[i] = raw
+        i = i + 1
+    }
+}
+
+fn t_zeros(shape: i64) -> i64 {
+    var t = t_alloc(shape)
+    t_fill(t, 0.0)
+    return t
+}
+
+fn t_ones(shape: i64) -> i64 {
+    var t = t_alloc(shape)
+    t_fill(t, 1.0)
+    return t
+}
+
+fn t_full(shape: i64, v: double) -> i64 {
+    var t = t_alloc(shape)
+    t_fill(t, v)
+    return t
+}
+
+// ============================================================
+// ÍNDICE MULTI-DIMENSIONAL <-> OFFSET PLANO
+// ============================================================
+
+fn t_flat_index(t: i64, idx: i64) -> i64 {
+    var d = t[0]
+    if idx[0] != d {
+        throw "tensor_d: numero de indices nao bate com o numero de dimensoes"
+    }
+    var offset = 0
+    var i = 0
+    while i < d {
+        var ix = idx[1 + i]
+        var dim = t[1 + i]
+        if ix < 0 { throw "tensor_d: indice negativo" }
+        if ix >= dim { throw "tensor_d: indice fora dos limites" }
+        offset = offset + ix * t[1 + d + i]
+        i = i + 1
+    }
+    return 2 * d + 1 + offset
+}
+
+fn t_get(t: i64, idx: i64) -> double {
+    return from_raw(t[t_flat_index(t, idx)])
+}
+
+fn t_set(t: i64, idx: i64, v: double) {
+    t[t_flat_index(t, idx)] = to_raw(v)
+}
+
+// Atalhos 1D/2D/3D — evitam montar um descritor pra cada acesso (bem
+// mais rápido em loop quente, tipo o miolo de um matmul).
+
+fn t_get1(t: i64, i: i64) -> double {
+    if t[0] != 1 { throw "t_get1: tensor nao e 1D" }
+    if i < 0 { throw "t_get1: indice negativo" }
+    if i >= t[1] { throw "t_get1: indice fora dos limites" }
+    return from_raw(t[3 + i])
+}
+
+fn t_set1(t: i64, i: i64, v: double) {
+    if t[0] != 1 { throw "t_set1: tensor nao e 1D" }
+    if i < 0 { throw "t_set1: indice negativo" }
+    if i >= t[1] { throw "t_set1: indice fora dos limites" }
+    t[3 + i] = to_raw(v)
+}
+
+fn t_get2(t: i64, i: i64, j: i64) -> double {
+    if t[0] != 2 { throw "t_get2: tensor nao e 2D" }
+    if i < 0 { throw "t_get2: indice de linha negativo" }
+    if i >= t[1] { throw "t_get2: indice de linha fora dos limites" }
+    if j < 0 { throw "t_get2: indice de coluna negativo" }
+    if j >= t[2] { throw "t_get2: indice de coluna fora dos limites" }
+    var off = i * t[3] + j * t[4]
+    return from_raw(t[5 + off])
+}
+
+fn t_set2(t: i64, i: i64, j: i64, v: double) {
+    if t[0] != 2 { throw "t_set2: tensor nao e 2D" }
+    if i < 0 { throw "t_set2: indice de linha negativo" }
+    if i >= t[1] { throw "t_set2: indice de linha fora dos limites" }
+    if j < 0 { throw "t_set2: indice de coluna negativo" }
+    if j >= t[2] { throw "t_set2: indice de coluna fora dos limites" }
+    var off = i * t[3] + j * t[4]
+    t[5 + off] = to_raw(v)
+}
+
+fn t_get3(t: i64, i: i64, j: i64, k: i64) -> double {
+    if t[0] != 3 { throw "t_get3: tensor nao e 3D" }
+    if i < 0 { throw "t_get3: indice 0 negativo" }
+    if i >= t[1] { throw "t_get3: indice 0 fora dos limites" }
+    if j < 0 { throw "t_get3: indice 1 negativo" }
+    if j >= t[2] { throw "t_get3: indice 1 fora dos limites" }
+    if k < 0 { throw "t_get3: indice 2 negativo" }
+    if k >= t[3] { throw "t_get3: indice 2 fora dos limites" }
+    var off = i * t[4] + j * t[5] + k * t[6]
+    return from_raw(t[7 + off])
+}
+
+fn t_set3(t: i64, i: i64, j: i64, k: i64, v: double) {
+    if t[0] != 3 { throw "t_set3: tensor nao e 3D" }
+    if i < 0 { throw "t_set3: indice 0 negativo" }
+    if i >= t[1] { throw "t_set3: indice 0 fora dos limites" }
+    if j < 0 { throw "t_set3: indice 1 negativo" }
+    if j >= t[2] { throw "t_set3: indice 1 fora dos limites" }
+    if k < 0 { throw "t_set3: indice 2 negativo" }
+    if k >= t[3] { throw "t_set3: indice 2 fora dos limites" }
+    var off = i * t[4] + j * t[5] + k * t[6]
+    t[7 + off] = to_raw(v)
+}
+
+// ============================================================
+// OPERAÇÕES ELEMENTO A ELEMENTO (exigem o mesmo shape)
+// ============================================================
+
+fn t_check_dims(a: i64, b: i64, op_name: str) {
+    var da = a[0]
+    var db = b[0]
+    if da != db {
+        throw op_name + ": numero de dimensoes incompativel"
+    }
+    var i = 1
+    while i <= da {
+        if a[i] != b[i] {
+            throw op_name + ": shape incompativel"
+        }
+        i = i + 1
+    }
+}
+
+fn t_add(a: i64, b: i64) -> i64 {
+    t_check_dims(a, b, "t_add")
+    var res = t_copy(a)
+    var d = a[0]
+    var start = 2 * d + 1
+    var end = start + t_size(a)
+    var i = start
+    while i < end {
+        res[i] = to_raw(from_raw(a[i]) + from_raw(b[i]))
+        i = i + 1
+    }
+    return res
+}
+
+fn t_sub(a: i64, b: i64) -> i64 {
+    t_check_dims(a, b, "t_sub")
+    var res = t_copy(a)
+    var d = a[0]
+    var start = 2 * d + 1
+    var end = start + t_size(a)
+    var i = start
+    while i < end {
+        res[i] = to_raw(from_raw(a[i]) - from_raw(b[i]))
+        i = i + 1
+    }
+    return res
+}
+
+// Hadamard (elemento a elemento) — NÃO é multiplicação de matriz, isso
+// é t_matmul.
+fn t_mul(a: i64, b: i64) -> i64 {
+    t_check_dims(a, b, "t_mul")
+    var res = t_copy(a)
+    var d = a[0]
+    var start = 2 * d + 1
+    var end = start + t_size(a)
+    var i = start
+    while i < end {
+        res[i] = to_raw(from_raw(a[i]) * from_raw(b[i]))
+        i = i + 1
+    }
+    return res
+}
+
+fn t_div(a: i64, b: i64) -> i64 {
+    t_check_dims(a, b, "t_div")
+    var res = t_copy(a)
+    var d = a[0]
+    var start = 2 * d + 1
+    var end = start + t_size(a)
+    var i = start
+    while i < end {
+        var bv = from_raw(b[i])
+        if bv == 0.0 {
+            throw "t_div: divisao por zero"
+        }
+        res[i] = to_raw(from_raw(a[i]) / bv)
+        i = i + 1
+    }
+    return res
+}
+
+fn t_scale(t: i64, factor: double) -> i64 {
+    var res = t_copy(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var i = start
+    while i < end {
+        res[i] = to_raw(from_raw(t[i]) * factor)
+        i = i + 1
+    }
+    return res
+}
+
+fn t_add_scalar(t: i64, v: double) -> i64 {
+    var res = t_copy(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var i = start
+    while i < end {
+        res[i] = to_raw(from_raw(t[i]) + v)
+        i = i + 1
+    }
+    return res
+}
+
+fn t_neg(t: i64) -> i64 {
+    return t_scale(t, -1.0)
+}
+
+// ============================================================
+// REDUÇÕES (globais, sobre todos os elementos)
+// ============================================================
+
+fn t_sum(t: i64) -> double {
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var s = 0.0
+    var i = start
+    while i < end {
+        s = s + from_raw(t[i])
+        i = i + 1
+    }
+    return s
+}
+
+fn t_prod(t: i64) -> double {
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var p = 1.0
+    var i = start
+    while i < end {
+        p = p * from_raw(t[i])
+        i = i + 1
+    }
+    return p
+}
+
+fn t_min(t: i64) -> double {
+    var sz = t_size(t)
+    if sz == 0 { throw "t_min: tensor vazio" }
+    var d = t[0]
+    var start = 2 * d + 1
+    var m = from_raw(t[start])
+    var end = start + sz
+    var i = start + 1
+    while i < end {
+        var v = from_raw(t[i])
+        if v < m { m = v }
+        i = i + 1
+    }
+    return m
+}
+
+fn t_max(t: i64) -> double {
+    var sz = t_size(t)
+    if sz == 0 { throw "t_max: tensor vazio" }
+    var d = t[0]
+    var start = 2 * d + 1
+    var m = from_raw(t[start])
+    var end = start + sz
+    var i = start + 1
+    while i < end {
+        var v = from_raw(t[i])
+        if v > m { m = v }
+        i = i + 1
+    }
+    return m
+}
+
+fn t_mean(t: i64) -> double {
+    var sz = t_size(t)
+    if sz == 0 { throw "t_mean: tensor vazio" }
+    return t_sum(t) / (sz * 1.0)
+}
+
+fn t_variance(t: i64) -> double {
+    var sz = t_size(t)
+    if sz == 0 { throw "t_variance: tensor vazio" }
+    var m = t_mean(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + sz
+    var acc = 0.0
+    var i = start
+    while i < end {
+        var diff = from_raw(t[i]) - m
+        acc = acc + diff * diff
+        i = i + 1
+    }
+    return acc / (sz * 1.0)
+}
+
+fn t_std(t: i64) -> double {
+    return sqrt(t_variance(t))
+}
+
+// ============================================================
+// OPERAÇÕES 2D (matriz) — o coração de qualquer camada de rede
+// ============================================================
+
+fn t_matmul(a: i64, b: i64) -> i64 {
+    if a[0] != 2 { throw "t_matmul: 'a' precisa ser 2D" }
+    if b[0] != 2 { throw "t_matmul: 'b' precisa ser 2D" }
+    var m = a[1]
+    var k = a[2]
+    var k2 = b[1]
+    var n = b[2]
+    if k != k2 {
+        throw "t_matmul: dimensoes incompativeis (colunas de a != linhas de b)"
+    }
+    var out = t_zeros(shape2(m, n))
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            var s = 0.0
+            var p = 0
+            while p < k {
+                s = s + t_get2(a, i, p) * t_get2(b, p, j)
+                p = p + 1
+            }
+            t_set2(out, i, j, s)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn t_transpose2(t: i64) -> i64 {
+    if t[0] != 2 { throw "t_transpose2: tensor precisa ser 2D" }
+    var rows = t[1]
+    var cols = t[2]
+    var res = t_zeros(shape2(cols, rows))
+    var i = 0
+    while i < rows {
+        var j = 0
+        while j < cols {
+            t_set2(res, j, i, t_get2(t, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn t_row(t: i64, i: i64) -> i64 {
+    if t[0] != 2 { throw "t_row: tensor precisa ser 2D" }
+    if i < 0 { throw "t_row: indice negativo" }
+    if i >= t[1] { throw "t_row: indice fora dos limites" }
+    var cols = t[2]
+    var res = t_zeros(shape1(cols))
+    var j = 0
+    while j < cols {
+        t_set1(res, j, t_get2(t, i, j))
+        j = j + 1
+    }
+    return res
+}
+
+// Soma um vetor 1D em cada LINHA de uma matriz 2D (o "+ b" de um
+// linear layer: y = x @ w + b). É o único caso de broadcasting que
+// essa lib faz — de propósito, não tem broadcasting geral tipo NumPy.
+fn t_add_row_bias(t: i64, bias: i64) -> i64 {
+    if t[0] != 2 { throw "t_add_row_bias: tensor precisa ser 2D" }
+    if bias[0] != 1 { throw "t_add_row_bias: bias precisa ser 1D" }
+    var cols = t[2]
+    if bias[1] != cols {
+        throw "t_add_row_bias: tamanho do bias nao bate com o numero de colunas"
+    }
+    var rows = t[1]
+    var res = t_copy(t)
+    var i = 0
+    while i < rows {
+        var j = 0
+        while j < cols {
+            var v = t_get2(res, i, j) + t_get1(bias, j)
+            t_set2(res, i, j, v)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn t_sum_axis1(t: i64) -> i64 {
+    // soma de cada LINHA -> vetor 1D com tamanho = numero de linhas
+    if t[0] != 2 { throw "t_sum_axis1: tensor precisa ser 2D" }
+    var rows = t[1]
+    var cols = t[2]
+    var res = t_zeros(shape1(rows))
+    var i = 0
+    while i < rows {
+        var s = 0.0
+        var j = 0
+        while j < cols {
+            s = s + t_get2(t, i, j)
+            j = j + 1
+        }
+        t_set1(res, i, s)
+        i = i + 1
+    }
+    return res
+}
+
+fn t_max_axis1(t: i64) -> i64 {
+    if t[0] != 2 { throw "t_max_axis1: tensor precisa ser 2D" }
+    var rows = t[1]
+    var cols = t[2]
+    if cols == 0 { throw "t_max_axis1: tensor sem colunas" }
+    var res = t_zeros(shape1(rows))
+    var i = 0
+    while i < rows {
+        var m = t_get2(t, i, 0)
+        var j = 1
+        while j < cols {
+            var v = t_get2(t, i, j)
+            if v > m { m = v }
+            j = j + 1
+        }
+        t_set1(res, i, m)
+        i = i + 1
+    }
+    return res
+}
+
+// ============================================================
+// ATIVAÇÕES (elemento a elemento, funcionam em qualquer shape)
+// ============================================================
+
+fn _t_sigmoid_scalar(x: double) -> double {
+    if x >= 0.0 {
+        return 1.0 / (1.0 + exp(-x))
+    }
+    var e = exp(x)
+    return e / (1.0 + e)
+}
+
+fn _t_tanh_scalar(x: double) -> double {
+    var ep = exp(x)
+    var en = exp(-x)
+    return (ep - en) / (ep + en)
+}
+
+fn _t_gelu_scalar(x: double) -> double {
+    var c = 0.7978845608
+    var k = 0.044715
+    var inner = c * (x + k * x * x * x)
+    return 0.5 * x * (1.0 + _t_tanh_scalar(inner))
+}
+
+fn t_relu(t: i64) -> i64 {
+    var res = t_copy(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var i = start
+    while i < end {
+        var v = from_raw(res[i])
+        if v < 0.0 {
+            res[i] = to_raw(0.0)
+        }
+        i = i + 1
+    }
+    return res
+}
+
+fn t_sigmoid(t: i64) -> i64 {
+    var res = t_copy(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var i = start
+    while i < end {
+        res[i] = to_raw(_t_sigmoid_scalar(from_raw(res[i])))
+        i = i + 1
+    }
+    return res
+}
+
+fn t_tanh(t: i64) -> i64 {
+    var res = t_copy(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var i = start
+    while i < end {
+        res[i] = to_raw(_t_tanh_scalar(from_raw(res[i])))
+        i = i + 1
+    }
+    return res
+}
+
+fn t_gelu(t: i64) -> i64 {
+    var res = t_copy(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var i = start
+    while i < end {
+        res[i] = to_raw(_t_gelu_scalar(from_raw(res[i])))
+        i = i + 1
+    }
+    return res
+}
+
+fn t_exp(t: i64) -> i64 {
+    var res = t_copy(t)
+    var d = t[0]
+    var start = 2 * d + 1
+    var end = start + t_size(t)
+    var i = start
+    while i < end {
+        res[i] = to_raw(exp(from_raw(res[i])))
+        i = i + 1
+    }
+    return res
+}
+
+// ============================================================
+// SOFTMAX / LAYER NORM (linha a linha, essencial pra atenção)
+// ============================================================
+
+// Softmax numericamente estável (subtrai o máximo de cada linha antes
+// de exponenciar) aplicado a cada LINHA de uma matriz 2D.
+fn t_softmax_row(t: i64) -> i64 {
+    if t[0] != 2 { throw "t_softmax_row: tensor precisa ser 2D" }
+    var rows = t[1]
+    var cols = t[2]
+    if cols == 0 { throw "t_softmax_row: tensor sem colunas" }
+    var res = t_zeros(shape2(rows, cols))
+    var i = 0
+    while i < rows {
+        var m = t_get2(t, i, 0)
+        var j = 1
+        while j < cols {
+            var v = t_get2(t, i, j)
+            if v > m { m = v }
+            j = j + 1
+        }
+        var s = 0.0
+        j = 0
+        while j < cols {
+            var e = exp(t_get2(t, i, j) - m)
+            t_set2(res, i, j, e)
+            s = s + e
+            j = j + 1
+        }
+        j = 0
+        while j < cols {
+            t_set2(res, i, j, t_get2(res, i, j) / s)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+// LayerNorm simples (sem gamma/beta aprendíveis) — normaliza cada
+// LINHA pra média 0 e variância 1.
+fn t_layer_norm(t: i64, eps: double) -> i64 {
+    if t[0] != 2 { throw "t_layer_norm: tensor precisa ser 2D" }
+    var rows = t[1]
+    var cols = t[2]
+    if cols == 0 { throw "t_layer_norm: tensor sem colunas" }
+    var res = t_zeros(shape2(rows, cols))
+    var i = 0
+    while i < rows {
+        var s = 0.0
+        var j = 0
+        while j < cols {
+            s = s + t_get2(t, i, j)
+            j = j + 1
+        }
+        var m = s / (cols * 1.0)
+        var var_s = 0.0
+        j = 0
+        while j < cols {
+            var diff = t_get2(t, i, j) - m
+            var_s = var_s + diff * diff
+            j = j + 1
+        }
+        var variance = var_s / (cols * 1.0)
+        var denom = sqrt(variance + eps)
+        j = 0
+        while j < cols {
+            t_set2(res, i, j, (t_get2(t, i, j) - m) / denom)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return res
+}
+
+// ============================================================
+// LINEAR LAYER / ATENÇÃO — os blocos de um Transformer
+// ============================================================
+
+// y = x @ w + b   (x: [N, in], w: [in, out], b: [out] como tensor 1D)
+fn t_linear(x: i64, w: i64, b: i64) -> i64 {
+    var y = t_matmul(x, w)
+    return t_add_row_bias(y, b)
+}
+
+// Atenção escalonada (scaled dot-product attention), o miolo de um
+// Transformer: softmax(q @ k^T / sqrt(d_k)) @ v.
+// q, k, v: tensores 2D [seq, d]. Não faz multi-head sozinho — pra
+// multi-head, fatia q/k/v em cabeças (com t_row/reshape na sua
+// aplicação) e chama t_attention uma vez por cabeça.
+fn t_attention(q: i64, k: i64, v: i64) -> i64 {
+    if q[0] != 2 { throw "t_attention: q precisa ser 2D" }
+    if k[0] != 2 { throw "t_attention: k precisa ser 2D" }
+    if v[0] != 2 { throw "t_attention: v precisa ser 2D" }
+    var d_k = q[2]
+    if k[2] != d_k {
+        throw "t_attention: dimensao (colunas) de q e k incompativel"
+    }
+    if k[1] != v[1] {
+        throw "t_attention: numero de linhas de k e v incompativel"
+    }
+    var kt = t_transpose2(k)
+    var scores = t_matmul(q, kt)
+    var scale = 1.0 / sqrt(d_k * 1.0)
+    var scaled = t_scale(scores, scale)
+    var weights = t_softmax_row(scaled)
+    return t_matmul(weights, v)
+}
+
+// ============================================================
+// IMPRESSÃO
+// ============================================================
+
+fn t_print_shape(t: i64) {
+    print_shape_nd(t)
+}
+
+fn _t_print_rec(t: i64, axis: i64, offset: i64) -> str {
+    var d = t[0]
+    var dim = t[1 + axis]
+    var stride = t[1 + d + axis]
+    var s = "["
+    var i = 0
+    while i < dim {
+        if axis == d - 1 {
+            s = s + str(from_raw(t[2 * d + 1 + offset + i * stride]))
+        } else {
+            s = s + _t_print_rec(t, axis + 1, offset + i * stride)
+        }
+        if i < dim - 1 {
+            s = s + ", "
+        }
+        i = i + 1
+    }
+    s = s + "]"
+    return s
+}
+
+// Imprime o tensor com colchetes aninhados de acordo com o shape,
+// tipo print(torch_tensor) — funciona pra qualquer numero de dimensoes.
+fn t_print(t: i64) {
+    print(_t_print_rec(t, 0, 0))
+}
+
+// ============================================================
+// LISTA DINÂMICA DE DOUBLE (dlist) — cresce sozinha (push amortizado)
+// ============================================================
+//
+// Diferente do tensor de shape fixo acima, um dlist é uma lista 1D
+// que você vai enchendo aos poucos sem saber o tamanho final de
+// antemão — útil pra guardar sequência de tokens/embeddings sendo
+// montada aos poucos, ou (em stdlib/snn.ay) o trem de spikes de uma
+// simulação, que não tem tamanho fixo conhecido no início.
+//
+//   L[0] = tamanho atual (n)
+//   L[1] = capacidade do buffer de dados
+//   L[2] = ponteiro (i64) pro array de dados (cada slot = to_raw(double))
+
+fn dlist_new(initial_capacity: i64) -> i64 {
+    var cap = initial_capacity
+    if cap < 1 {
+        cap = 1
+    }
+    var l = array(3)
+    l[0] = 0
+    l[1] = cap
+    l[2] = array(cap)
+    return l
+}
+
+fn dlist_len(l: i64) -> i64 {
+    return l[0]
+}
+
+fn dlist_capacity(l: i64) -> i64 {
+    return l[1]
+}
+
+fn dlist_get(l: i64, i: i64) -> double {
+    if i < 0 { throw "dlist_get: indice negativo" }
+    if i >= l[0] { throw "dlist_get: indice fora dos limites" }
+    var data = l[2]
+    return from_raw(data[i])
+}
+
+fn dlist_set(l: i64, i: i64, v: double) {
+    if i < 0 { throw "dlist_set: indice negativo" }
+    if i >= l[0] { throw "dlist_set: indice fora dos limites" }
+    var data = l[2]
+    data[i] = to_raw(v)
+}
+
+fn dlist_push(l: i64, v: double) {
+    var n = l[0]
+    var cap = l[1]
+    var data = l[2]
+    if n >= cap {
+        var new_cap = cap * 2
+        var new_data = array(new_cap)
+        var i = 0
+        while i < n {
+            new_data[i] = data[i]
+            i = i + 1
+        }
+        data = new_data
+        l[1] = new_cap
+        l[2] = data
+    }
+    data[n] = to_raw(v)
+    l[0] = n + 1
+}
+
+fn dlist_clear(l: i64) {
+    l[0] = 0
+}
+
+// Converte o conteúdo atual (só os primeiros dlist_len(l) elementos,
+// não a capacidade sobrando) num tensor 1D de shape fixo.
+fn dlist_to_tensor(l: i64) -> i64 {
+    var n = l[0]
+    var t = t_alloc(shape1(n))
+    var start = 2 * t[0] + 1
+    var data = l[2]
+    var i = 0
+    while i < n {
+        t[start + i] = data[i]
+        i = i + 1
+    }
+    return t
+}

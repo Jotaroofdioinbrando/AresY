@@ -191,6 +191,56 @@ Comentário: // até o fim da linha.
                                 transpose_nd(t,perm) (permutação de eixos)
                     impressão:  print_nd(t) print_shape_nd(t)
                   import "stdlib/tensor.ay" pra usar.
+      vector.ay   vetor dinâmico — array de i64 que CRESCE sozinho (o
+                  array() nativo tem tamanho fixo). Cresce dobrando a
+                  capacidade quando precisa; operações que podem
+                  realocar (vec_push, vec_insert, vec_reserve, vec_extend,
+                  vec_concat) devolvem o vetor atualizado — sempre
+                  reatribua: `v = vec_push(v, x)`.
+                    criação:    vec_new(cap)
+                    metadados:  vec_len(v) vec_cap(v) vec_is_empty(v)
+                    acesso:     vec_get(v,i) vec_set(v,i,val)
+                                vec_front(v) vec_back(v)
+                    inserção:   vec_push(v,val) vec_insert(v,i,val)
+                    remoção:    vec_pop(v) vec_remove(v,i) vec_clear(v)
+                    combinação: vec_extend(v,outro) vec_concat(a,b)
+                    utilidades: vec_copy(v) vec_fill(v,val) vec_sum(v)
+                                vec_contains(v,val) vec_index_of(v,val)
+                    interop:    vec_to_array(v) vec_from_array(arr)
+                                (arr no estilo numares.ay: arr[0]=n)
+                    impressão:  print_vec(v)
+                  import "stdlib/vector.ay" pra usar.
+      tensor_d.ay tensores dinâmicos N-dimensionais de PONTO FLUTUANTE
+                  (double) — a versão "de verdade" do tensor.ay pra redes
+                  tipo Transformer (matmul, attention, softmax, layer_norm)
+                  e simulação numérica tipo Brian2. Mesmo layout do
+                  tensor.ay, mas cada slot de dado guarda to_raw(double).
+                  Reusa shapeN/idxN do tensor.ay (import "tensor.ay" já
+                  vem junto). Sem autograd — é motor de forward pass.
+                    criação:    t_zeros(shape) t_ones(shape)
+                                t_full(shape,v) t_copy(t)
+                    metadados:  t_ndim(t) t_size(t) t_dim(t,eixo)
+                                t_shape(t) t_strides(t)
+                    acesso:     t_get(t,idx) t_set(t,idx,v) — e atalhos
+                                mais rápidos t_get1/t_set1, t_get2/t_set2,
+                                t_get3/t_set3 (evitam montar descritor)
+                    elemento a elemento: t_add t_sub t_mul t_div t_scale
+                                t_add_scalar t_neg
+                    reduções:   t_sum() t_prod() t_min() t_max() t_mean()
+                                t_variance() t_std()
+                    matriz 2D:  t_matmul(a,b) t_transpose2(t) t_row(t,i)
+                                t_add_row_bias(t,bias) t_sum_axis1(t)
+                                t_max_axis1(t)
+                    ativações:  t_relu(t) t_sigmoid(t) t_tanh(t) t_gelu(t)
+                                t_exp(t)
+                    transformer: t_softmax_row(t) t_layer_norm(t,eps)
+                                t_linear(x,w,b) t_attention(q,k,v)
+                    impressão:  t_print(t) t_print_shape(t)
+                    lista dinâmica de double (dlist, cresce sozinha):
+                                dlist_new(cap) dlist_len(l) dlist_push(l,v)
+                                dlist_get(l,i) dlist_set(l,i,v)
+                                dlist_clear(l) dlist_to_tensor(l)
+                  import "stdlib/tensor_d.ay" pra usar.
 
 --- Pacotes de terceiros (aresy install) ---
     aresy install                instala tudo que já foi registrado
