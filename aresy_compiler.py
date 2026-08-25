@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -1999,6 +1999,73 @@ def _pkg_name_from_url(url):
     return name
 
 
+def _render_bar(pct, width=24):
+    pct = max(0, min(100, pct))
+    filled = int(width * pct / 100)
+    bar = "#" * filled + "-" * (width - filled)
+    return f"[{bar}] {pct:3d}%"
+
+
+def _progress_line(pct, label):
+    sys.stdout.write("\r" + _render_bar(pct) + f"  {label}" + " " * 10)
+    sys.stdout.flush()
+
+
+def _finish_progress_line(label, ok=True):
+    sys.stdout.write("\r" + _render_bar(100 if ok else 0) + f"  {label}\n")
+    sys.stdout.flush()
+
+
+def _run_git_with_progress(args, label):
+    """Roda um comando git mostrando barra de progresso de verdade, lida
+    a partir da própria saída de '--progress' do git (linhas tipo
+    'Receiving objects:  45% (450/1000)') — sem mostrar URL nem o output
+    cru do git pro usuário."""
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
+    last_pct = 0
+    stderr_lines = []
+    _progress_line(0, label)
+    if proc.stderr is not None:
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            m = re.search(r"(\d+)%", line)
+            if m:
+                last_pct = int(m.group(1))
+                _progress_line(last_pct, label)
+    proc.wait()
+    _finish_progress_line(label, ok=(proc.returncode == 0))
+    return proc.returncode, "".join(stderr_lines)
+
+
+def _http_get_with_progress(url, label, timeout=15):
+    """Baixa um arquivo mostrando barra de progresso (percentual real,
+    via Content-Length quando disponível) — sem mostrar a URL."""
+    req = urllib.request.Request(url, headers={"User-Agent": "aresy-package-manager"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total_hdr = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+            total = int(total_hdr) if total_hdr else None
+            chunks = []
+            read = 0
+            _progress_line(0, label)
+            while True:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                read += len(chunk)
+                if total:
+                    _progress_line(int(read * 100 / total), label)
+            _finish_progress_line(label, ok=True)
+            return b"".join(chunks)
+    except urllib.error.HTTPError as e:
+        _finish_progress_line(label, ok=False)
+        raise RuntimeError(f"HTTP {e.code}")
+    except urllib.error.URLError as e:
+        _finish_progress_line(label, ok=False)
+        raise RuntimeError(f"não consegui conectar ({e.reason})")
+
+
 def _git_available():
     return shutil.which("git") is not None
 
@@ -2047,11 +2114,10 @@ def _resolve_from_index(name):
 def _install_one_file(dest_dir, name, url):
     """Baixa um pacote de arquivo único (.ay cru) via HTTP direto — sem
     git, sem clone. É o caso comum de um pacote publicado no aresy-index."""
-    print(f"  {name}: baixando {url}...")
     try:
-        data = _http_get(url)
+        data = _http_get_with_progress(url, name)
     except RuntimeError as e:
-        print(f"  {name}: FALHOU -> {e}")
+        print(f"{name}: falhou -> {e}")
         return False
     os.makedirs(dest_dir, exist_ok=True)
     entry_path = os.path.join(dest_dir, f"{name}.ay")
@@ -2059,9 +2125,9 @@ def _install_one_file(dest_dir, name, url):
         with open(entry_path, "wb") as f:
             f.write(data)
     except OSError as e:
-        print(f"  {name}: FALHOU ao salvar em {entry_path} -> {e}")
+        print(f"{name}: falhou ao salvar -> {e}")
         return False
-    print(f"  {name}: OK")
+    print(f"instalado: {name}")
     return True
 
 
@@ -2080,21 +2146,19 @@ def _install_one(project_dir, name, url):
         print("Erro: 'git' não foi encontrado. Instala com: pkg install git")
         return False
     if os.path.isdir(os.path.join(dest, ".git")):
-        print(f"  {name}: já instalado, atualizando (git pull)...")
-        proc = subprocess.run(["git", "-C", dest, "pull", "--quiet"], capture_output=True, text=True)
+        rc, err = _run_git_with_progress(["git", "-C", dest, "pull", "--progress"], name)
     else:
-        print(f"  {name}: clonando de {url}...")
         os.makedirs(os.path.join(project_dir, PACKAGES_DIR), exist_ok=True)
-        proc = subprocess.run(["git", "clone", "--quiet", url, dest], capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"  {name}: FALHOU -> {proc.stderr.strip()}")
+        rc, err = _run_git_with_progress(["git", "clone", "--progress", url, dest], name)
+    if rc != 0:
+        print(f"{name}: falhou -> {err.strip().splitlines()[-1] if err.strip() else 'erro desconhecido'}")
         return False
     entry = os.path.join(dest, f"{name}.ay")
     if not os.path.isfile(entry):
-        print(f"  {name}: aviso — instalado, mas não achei '{name}.ay' na raiz do pacote "
+        print(f"{name}: aviso — instalado, mas não achei '{name}.ay' na raiz do pacote "
               f"(o autor deveria nomear o arquivo principal igual ao pacote)")
     else:
-        print(f"  {name}: OK")
+        print(f"instalado: {name}")
     return True
 
 
@@ -2109,7 +2173,6 @@ def cmd_install(args):
             print(f"Uso: aresy install <nome-do-pacote>          (procura no aresy-index)")
             print(f"     aresy install <url> [nome]              (git ou link .ay direto)")
             return
-        print(f"Instalando {len(deps)} pacote(s) de {MANIFEST_NAME}...")
         ok = all(_install_one(project_dir, name, url) for name, url in deps.items())
         sys.exit(0 if ok else 1)
 
@@ -2122,13 +2185,13 @@ def cmd_install(args):
         # "aresy install <nome>" — sem URL, procura no índice central
         # (aresy-index), que é a forma normal de instalar hoje em dia.
         name = first
-        print(f"Procurando '{name}' no índice de pacotes (aresy-index)...")
+        print(f"procurando {name}...")
         try:
             url = _resolve_from_index(name)
         except RuntimeError as e:
             print(f"Erro: {e}")
             sys.exit(1)
-        print(f"  encontrado: {url}")
+        print(f"achou {name}")
 
     manifest["dependencies"][name] = url
     _save_manifest(project_dir, manifest)
