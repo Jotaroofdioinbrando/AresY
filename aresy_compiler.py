@@ -172,8 +172,8 @@ Comentário: // até o fim da linha.
                   import "stdlib/numares.ay" pra usar.
 
 --- Pacotes de terceiros (aresy install) ---
-    aresy install                instala tudo que está listado no
-                                  aresy.json do diretório atual
+    aresy install                instala tudo que já foi registrado
+                                  como dependência neste diretório
     aresy install <nome>         procura <nome> no índice central
                                   (aresy-index) e instala
     aresy install <url> [nome]   instala direto de uma URL — repo git
@@ -184,8 +184,6 @@ Comentário: // até o fim da linha.
 
     Pacotes instalados vão pra ares_packages/<nome>/ e ficam visíveis
     pra "import <nome>" automaticamente — não precisa de sintaxe nova.
-    O aresy.json guarda as dependências do projeto (nome -> URL), tipo
-    um package.json/requirements.txt bem simples.
     Atenção: instalar um pacote baixa e (na próxima vez que for usado)
     compila/roda código de terceiros — só instale de fontes em que
     você confia, do mesmo jeito que faria com qualquer gerenciador de
@@ -292,7 +290,8 @@ class Bool:
 class Var:
     def __init__(self, name): self.name = name
 class VarDecl:
-    def __init__(self, name, expr): self.name, self.expr = name, expr
+    def __init__(self, name, expr, decl_type=None):
+        self.name, self.expr, self.decl_type = name, expr, decl_type
 class Assign:
     def __init__(self, name, expr): self.name, self.expr = name, expr
 class IndexGet:
@@ -419,9 +418,14 @@ class Parser:
         if tok.kind == "VAR":
             self.advance()
             name = self.expect("ID").value
+            decl_type = None
+            if self.peek().value == ":":
+                self.advance()
+                traw = self.expect("ID").value
+                decl_type = resolve_type_name(traw)
             self.expect("OP")  # =
             expr = self.parse_expr()
-            return VarDecl(name, expr)
+            return VarDecl(name, expr, decl_type=decl_type)
         if tok.kind == "RETURN":
             self.advance()
             if self.peek().value in ("}",):
@@ -754,7 +758,16 @@ class CodeGen:
         if isinstance(node, Num): return "double" if node.is_float else "i64"
         if isinstance(node, Str): return "str"
         if isinstance(node, Var): return known.get(node.name, "i64")
-        if isinstance(node, Call) and node.name in ("sqrt", "time"): return "double"
+        if isinstance(node, Call) and node.name in (
+            "sqrt", "time", "sin", "cos", "tan", "atan", "atan2",
+            "log", "log10", "exp", "floor", "ceil", "pow", "pi", "from_raw",
+        ):
+            return "double"
+        if isinstance(node, Call) and node.name in ("abs", "min", "max"):
+            # polimórficas (i64 ou double, dependendo do argumento) — usa o
+            # tipo adivinhado do primeiro argumento, mesma lógica do codegen
+            # de verdade (ver gen_call).
+            return self._guess_type(node.args[0], known) if node.args else "i64"
         if isinstance(node, Call) and node.name in ("upper", "lower", "substr", "char_at", "str",
                                                       "read_line", "read_file"):
             return "str"
@@ -890,7 +903,7 @@ class CodeGen:
         rejeita isso como "Instruction does not dominate all uses"."""
         for s in body:
             if isinstance(s, VarDecl):
-                t = self._guess_type(s.expr, out)
+                t = s.decl_type if s.decl_type is not None else self._guess_type(s.expr, out)
                 if s.name in out:
                     if (out[s.name] == "str") != (t == "str"):
                         raise CompileError(
