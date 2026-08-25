@@ -170,6 +170,27 @@ Comentário: // até o fim da linha.
                     matriz 2D:  transpose_2d matmul_2d det_2x2/3x3
                                 inv_2x2 solve_2x2 matvec_mul
                   import "stdlib/numares.ay" pra usar.
+      tensor.ay   tensores dinâmicos N-dimensionais (2D, 3D, 4D... — o
+                  número de dimensões é decidido em tempo de execução).
+                  Layout: t[0] = ndim, shape e strides no cabeçalho,
+                  dados em row-major logo depois. Shape/índice são
+                  passados como descritores (mesmo estilo do numares.ay:
+                  desc[0] = quantidade, desc[1..n] = valores), montados
+                  com os atalhos shapeN/idxN (N de 1 a 5):
+                    criação:    zeros_nd(shape) ones_nd(shape)
+                                full_nd(shape,v) copy_nd(t)
+                    metadados:  ndim_nd(t) size_nd(t) dim_nd(t,eixo)
+                                shape_nd(t) strides_nd(t)
+                    acesso:     get_nd(t,idx) set_nd(t,idx,v)
+                                (com checagem de limites)
+                    elemento a elemento: add_nd sub_nd mul_nd div_nd
+                                scale_nd
+                    stats:      sum_nd() prod_nd() amin_nd() amax_nd()
+                                mean_nd() variance_nd() std_nd()
+                    forma:      reshape_nd() flatten_nd() from_flat_nd()
+                                transpose_nd(t,perm) (permutação de eixos)
+                    impressão:  print_nd(t) print_shape_nd(t)
+                  import "stdlib/tensor.ay" pra usar.
 
 --- Pacotes de terceiros (aresy install) ---
     aresy install                instala tudo que já foi registrado
