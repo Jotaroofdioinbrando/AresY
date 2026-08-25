@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -876,12 +876,75 @@ class CodeGen:
 
     _STR_BUILTIN_FIRST_ARG = {"upper", "lower", "len", "substr", "char_at"}
 
+    def _collect_calls_into(self, stmts, calls_by_name):
+        """Varre uma lista de statements (recursivamente) catando toda
+        chamada de função, agrupada por nome. Usado pela inferência de
+        tipo de parâmetro por call-site (ver _infer_param_type_from_calls)
+        — bem parecido com o walker de _infer_param_type, mas coletando
+        TODAS as chamadas em vez de procurar uma evidência específica."""
+        def walk_expr(e):
+            if e is None:
+                return
+            if isinstance(e, Call):
+                calls_by_name.setdefault(e.name, []).append(e)
+                for a in e.args:
+                    walk_expr(a)
+            elif isinstance(e, BinOp):
+                walk_expr(e.left); walk_expr(e.right)
+            elif isinstance(e, UnaryOp):
+                walk_expr(e.operand)
+            elif isinstance(e, IndexGet):
+                walk_expr(e.arr); walk_expr(e.idx)
+
+        def walk_stmt(s):
+            if isinstance(s, (VarDecl, Assign)):
+                walk_expr(s.expr)
+            elif isinstance(s, IndexSet):
+                walk_expr(s.arr); walk_expr(s.idx); walk_expr(s.expr)
+            elif isinstance(s, Print):
+                walk_expr(s.expr)
+            elif isinstance(s, If):
+                walk_expr(s.cond)
+                for x in s.then_b: walk_stmt(x)
+                for x in s.else_b: walk_stmt(x)
+            elif isinstance(s, While):
+                walk_expr(s.cond)
+                for x in s.body: walk_stmt(x)
+            elif isinstance(s, TryCatch):
+                for x in s.try_body: walk_stmt(x)
+                for x in s.catch_body: walk_stmt(x)
+            elif isinstance(s, Throw):
+                walk_expr(s.expr)
+            elif isinstance(s, Return):
+                if s.expr is not None: walk_expr(s.expr)
+            elif isinstance(s, ExprStmt):
+                walk_expr(s.expr)
+
+        for s in stmts:
+            walk_stmt(s)
+
+    def _infer_param_type_from_calls(self, fname, idx, calls_by_name):
+        """Segunda tentativa quando o CORPO da função não dá nenhuma pista
+        de tipo (caso comum: 'fn assert_close(name, got, expected, eps)'
+        só usa os parâmetros em operações neutras tipo subtração/comparação
+        entre si — não tem nenhum literal ali que entregue o tipo). Em vez
+        disso, olha pra quem CHAMA essa função: se algum call site passa
+        nesse parâmetro um literal double, uma string, ou o retorno de uma
+        função já conhecida como double/str, usa isso como evidência."""
+        for c in calls_by_name.get(fname, []):
+            if idx >= len(c.args):
+                continue
+            t = self._guess_type(c.args[idx])
+            if t != "i64":
+                return t
+        return None
+
     def _infer_param_type(self, param_name, body):
         """Parâmetro sem anotação ('fn f(s) {...}'): tenta adivinhar 'str'
         olhando como ele é usado no corpo (passado pra uma função de string,
         ou comparado/concatenado com uma string literal). Sem nenhuma
         evidência, cai no padrão de sempre: i64."""
-        found = {"str": False}
+        found = {"str": False, "double": False}
 
         def walk_expr(e):
             if e is None or found["str"]:
@@ -897,6 +960,8 @@ class CodeGen:
                 r_is_p = isinstance(e.right, Var) and e.right.name == param_name
                 if l_is_p and isinstance(e.right, Str): found["str"] = True
                 if r_is_p and isinstance(e.left, Str): found["str"] = True
+                if l_is_p and isinstance(e.right, Num) and e.right.is_float: found["double"] = True
+                if r_is_p and isinstance(e.left, Num) and e.left.is_float: found["double"] = True
                 walk_expr(e.left); walk_expr(e.right)
             elif isinstance(e, UnaryOp):
                 walk_expr(e.operand)
@@ -933,7 +998,11 @@ class CodeGen:
             walk_stmt(s)
             if found["str"]:
                 break
-        return "str" if found["str"] else "i64"
+        if found["str"]:
+            return "str"
+        if found["double"]:
+            return "double"
+        return "i64"
 
     EXTERN_TYPE_MAP = {"i64": "i64", "f64": "double", "void": "void"}
 
@@ -956,6 +1025,16 @@ class CodeGen:
             llvm_ret = "void" if ret_t == "void" else ret_t
             extern_ir.append(f"declare {llvm_ret} @{e.name}({', '.join(param_ts)})")
 
+        # coleta todas as chamadas de função do programa inteiro ANTES de
+        # resolver os parâmetros sem anotação — precisamos disso pra
+        # inferência por call-site (ver _infer_param_type_from_calls):
+        # às vezes o CORPO da função não dá nenhuma pista de tipo (ex.:
+        # "fn assert_close(name, got, expected, eps) { ... got - expected ... }"),
+        # mas quem CHAMA ela passa um literal double/string óbvio.
+        calls_by_name = {}
+        for f in funcdefs:
+            self._collect_calls_into(f.body, calls_by_name)
+
         for f in funcdefs:
             if f.name in self.functions:
                 raise CompileError(f"'{f.name}' já foi declarada (conflito com extern)")
@@ -963,10 +1042,20 @@ class CodeGen:
             # uso — sem isso, toda função que recebe string sem anotar
             # explicitamente ("fn f(s) { return upper(s) }") quebrava com
             # erro de tipo, mesmo sendo óbvio pelo uso que 's' é string.
-            f.param_types = [
-                t if t is not None else self._infer_param_type(p, f.body)
-                for p, t in zip(f.params, f.param_types)
-            ]
+            # Se o corpo não der pista nenhuma (fica no default i64), tenta
+            # de novo olhando como a função é CHAMADA em outros lugares.
+            new_types = []
+            for idx, (p, t) in enumerate(zip(f.params, f.param_types)):
+                if t is not None:
+                    new_types.append(t)
+                    continue
+                guessed = self._infer_param_type(p, f.body)
+                if guessed == "i64":
+                    alt = self._infer_param_type_from_calls(f.name, idx, calls_by_name)
+                    if alt is not None:
+                        guessed = alt
+                new_types.append(guessed)
+            f.param_types = new_types
             # "params" agora guarda os TIPOS reais de cada parâmetro (unificado
             # com extern, que já funcionava assim). "ret" usa a anotação
             # explícita ('-> tipo') se houver; senão cai na heurística antiga
