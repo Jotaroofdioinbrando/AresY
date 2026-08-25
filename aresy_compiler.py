@@ -120,6 +120,10 @@ Comentário: // até o fim da linha.
     Matemática:  sqrt(x) sin(x) cos(x) tan(x) atan(x) atan2(y,x)
                  log(x) log10(x) exp(x) pow(b,e) floor(x) ceil(x)
                  abs(x) min(a,b) max(a,b) pi()
+                 to_raw(double) -> i64    reinterpreta os bits (não
+                 from_raw(i64) -> double  converte) — pra guardar double
+                                           dentro de um array (que só
+                                           guarda i64 por posição)
     Tempo:       time() -> segundos desde epoch (double)
                  sleep(segundos) -> pausa a execução (aceita float)
     Aleatório:   random(n) -> inteiro entre 0 e n-1
@@ -167,11 +171,32 @@ Comentário: // até o fim da linha.
                                 inv_2x2 solve_2x2 matvec_mul
                   import "stdlib/numares.ay" pra usar.
 
+--- Pacotes de terceiros (aresy install) ---
+    aresy install                instala tudo que está listado no
+                                  aresy.json do diretório atual
+    aresy install <nome>         procura <nome> no índice central
+                                  (aresy-index) e instala
+    aresy install <url> [nome]   instala direto de uma URL — repo git
+                                  ou link cru pra um arquivo .ay
+    aresy uninstall <nome>       remove uma dependência
+    aresy list                   lista as dependências e se cada uma
+                                  está instalada
+
+    Pacotes instalados vão pra ares_packages/<nome>/ e ficam visíveis
+    pra "import <nome>" automaticamente — não precisa de sintaxe nova.
+    O aresy.json guarda as dependências do projeto (nome -> URL), tipo
+    um package.json/requirements.txt bem simples.
+    Atenção: instalar um pacote baixa e (na próxima vez que for usado)
+    compila/roda código de terceiros — só instale de fontes em que
+    você confia, do mesmo jeito que faria com qualquer gerenciador de
+    pacotes.
+
 --- Rodando programas ---
     aresy                       modo interativo (REPL, nativo via clang)
     aresy programa.ay           compila e roda direto
     aresy run programa.ay       mesma coisa, explícito
     aresy build programa.ay saida.ll   gera só o LLVM IR
+    aresy install / uninstall / list   gerenciador de pacotes (ver acima)
     aresy --version             mostra a versão
     aresy --help                lista de comandos e flags
     aresy --how                 este resumo de sintaxe

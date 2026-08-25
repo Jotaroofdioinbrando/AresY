@@ -3,6 +3,12 @@
 Linguagem aresY: sintaxe própria, compila pra LLVM IR e usa o `clang` como
 backend (binário nativo de verdade, não interpretado).
 
+Tipos (`i64`/`double`/`str`), funções com anotação de tipo opcional,
+arrays, `try`/`catch`/`throw`, ponteiro de função, `extern fn` (chama
+biblioteca C), sistema de `import` de arquivos `.ay`, coletor de lixo
+(Boehm GC) e um gerenciador de pacotes (`aresy install`) pra puxar
+bibliotecas de terceiros.
+
 ## Instalar o comando `aresy` no Termux
 
 ```
@@ -123,6 +129,10 @@ fn main() {
   `pow` `floor` `ceil` `abs` `min` `max` `pi()` `time()` `sleep(s)`
   `random(n)` `input()` `read_line()` `read_file(caminho)`
   `write_file(caminho, txt)` `append_file(caminho, txt)`
+  `to_raw(double) -> i64` / `from_raw(i64) -> double` — reinterpreta os
+  bits (não converte o valor); serve pra guardar `double` dentro de um
+  `array`, que só guarda `i64` por posição (é assim que `numares.ay`
+  implementa os arrays "_d" de ponto flutuante)
 
 ## Bibliotecas nativas em .ay (import de módulo)
 
@@ -172,7 +182,39 @@ bibliotecas em `stdlib/`:
   }
   ```
 
-Veja `exemplo_stdlib.ay` pra um exemplo completo usando `mathx`/`strings`.
+
+## Gerenciador de pacotes (aresy install)
+
+Além das bibliotecas locais (`import "arquivo.ay"`), dá pra instalar
+pacotes de terceiros publicados pela comunidade:
+
+```
+aresy install numares            # procura "numares" no índice central
+                                  # (aresy-index) e instala
+aresy install https://github.com/fulano/lib-x   # instala direto de um
+                                  # repositório git
+aresy install https://raw.githubusercontent.com/fulano/lib-x/main/lib-x.ay
+                                  # ou de um link direto pra um .ay cru
+aresy uninstall numares           # remove
+aresy list                        # lista dependências e se cada uma
+                                   # está instalada
+aresy install                     # sem argumento: instala tudo que
+                                   # está no aresy.json do projeto
+```
+
+Um pacote instalado vai pra `ares_packages/<nome>/` e fica disponível
+automaticamente pra `import <nome>` — não precisa de nenhuma sintaxe
+nova, é o mesmo `import` de sempre. As dependências do projeto ficam
+registradas num `aresy.json` na raiz (nome -> URL), parecido com um
+`package.json`/`requirements.txt` bem simples; ele é criado/atualizado
+sozinho a cada `aresy install <algo>`.
+
+Pacotes sem URL explícita (`aresy install <nome>`) são resolvidos
+consultando o **aresy-index**, um índice central mantido no GitHub.
+Isso significa que instalar um pacote faz uma requisição de rede e,
+mais cedo ou mais tarde, compila e roda código de terceiros — trate
+`aresy install` com o mesmo cuidado que teria com `pip install` ou
+`npm install`: só instale de nomes/URLs em que você confia.
 
 ## Coletor de lixo (GC)
 
