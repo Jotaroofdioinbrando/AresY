@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "0.7.2"
+VERSION = "0.8.0"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -1743,6 +1743,29 @@ import os
 import shutil
 import subprocess
 import tempfile
+import json
+
+
+PACKAGES_DIR = "ares_packages"
+MANIFEST_NAME = "aresy.json"
+
+
+def _resolve_ay_import(name, base_dir):
+    """Acha o arquivo .ay de um 'import nome'/'import "nome.ay"'.
+
+    Ordem de busca:
+    1. Caminho relativo normal (import local, como sempre funcionou).
+    2. ares_packages/<nome-sem-.ay>/<nome-sem-.ay>.ay — pacote instalado
+       via `aresy install` (ver PackageManager mais abaixo).
+    """
+    direct = os.path.normpath(os.path.join(base_dir, name))
+    if os.path.isfile(direct):
+        return direct
+    stem = name[:-3] if name.endswith(".ay") else name
+    pkg_path = os.path.normpath(os.path.join(base_dir, PACKAGES_DIR, stem, stem + ".ay"))
+    if os.path.isfile(pkg_path):
+        return pkg_path
+    return direct  # não achou em lugar nenhum; devolve o caminho direto pro erro apontar pra ele
 
 
 def _read_ay_source(path):
@@ -1768,11 +1791,16 @@ def expand_ay_imports(stmts, base_dir, seen):
     out = []
     for s in stmts:
         if isinstance(s, ImportDecl) and s.name.endswith(".ay"):
-            lib_path = os.path.normpath(os.path.join(base_dir, s.name))
+            lib_path = _resolve_ay_import(s.name, base_dir)
             if lib_path in seen:
                 continue
             if not os.path.isfile(lib_path):
-                raise CompileError(f"Biblioteca '{s.name}' não encontrada (procurei em {lib_path})")
+                stem = s.name[:-3] if s.name.endswith(".ay") else s.name
+                raise CompileError(
+                    f"Biblioteca '{s.name}' não encontrada (procurei em {lib_path} "
+                    f"e em {PACKAGES_DIR}/{stem}/{stem}.ay). Se for um pacote de terceiros, "
+                    f"rode 'aresy install' primeiro."
+                )
             seen.add(lib_path)
             lib_src = _read_ay_source(lib_path)
             lib_stmts = Parser(tokenize(lib_src)).parse_program()
@@ -1793,6 +1821,123 @@ def find_clang():
         if path:
             return path
     return None
+
+
+# =============================================================================
+# Gerenciador de pacotes ("aresy install", tipo um pip bem simples)
+#
+# Um pacote é só um repositório git cujo topo tem um arquivo <nome>.ay
+# (o mesmo padrão que "import nome" já procura localmente). O manifesto
+# do projeto (aresy.json) lista as dependências como {nome: url_do_git}.
+# "aresy install" clona (ou dá pull, se já existir) cada uma delas dentro
+# de ares_packages/<nome>/. Depois disso, "import nome" no seu programa
+# passa a enxergar o pacote automaticamente (ver _resolve_ay_import acima)
+# — não precisa de nenhuma sintaxe nova.
+# =============================================================================
+
+def _load_manifest(project_dir):
+    path = os.path.join(project_dir, MANIFEST_NAME)
+    if not os.path.isfile(path):
+        return {"name": os.path.basename(os.path.abspath(project_dir)) or "projeto-aresy",
+                "dependencies": {}}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("dependencies", {})
+    return data
+
+
+def _save_manifest(project_dir, data):
+    path = os.path.join(project_dir, MANIFEST_NAME)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def _pkg_name_from_url(url):
+    name = url.rstrip("/").split("/")[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    return name
+
+
+def _git_available():
+    return shutil.which("git") is not None
+
+
+def _install_one(project_dir, name, url):
+    if not _git_available():
+        print("Erro: 'git' não foi encontrado. Instala com: pkg install git")
+        return False
+    dest = os.path.join(project_dir, PACKAGES_DIR, name)
+    if os.path.isdir(os.path.join(dest, ".git")):
+        print(f"  {name}: já instalado, atualizando (git pull)...")
+        proc = subprocess.run(["git", "-C", dest, "pull", "--quiet"], capture_output=True, text=True)
+    else:
+        print(f"  {name}: clonando de {url}...")
+        os.makedirs(os.path.join(project_dir, PACKAGES_DIR), exist_ok=True)
+        proc = subprocess.run(["git", "clone", "--quiet", url, dest], capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"  {name}: FALHOU -> {proc.stderr.strip()}")
+        return False
+    entry = os.path.join(dest, f"{name}.ay")
+    if not os.path.isfile(entry):
+        print(f"  {name}: aviso — instalado, mas não achei '{name}.ay' na raiz do pacote "
+              f"(o autor deveria nomear o arquivo principal igual ao pacote)")
+    else:
+        print(f"  {name}: OK")
+    return True
+
+
+def cmd_install(args):
+    project_dir = os.getcwd()
+    manifest = _load_manifest(project_dir)
+    if not args:
+        # "aresy install" sem argumentos: instala tudo que está no manifesto
+        deps = manifest["dependencies"]
+        if not deps:
+            print(f"Nenhuma dependência em {MANIFEST_NAME} (nada pra instalar).")
+            print(f"Uso: aresy install <url-do-git> [nome]")
+            return
+        print(f"Instalando {len(deps)} pacote(s) de {MANIFEST_NAME}...")
+        ok = all(_install_one(project_dir, name, url) for name, url in deps.items())
+        sys.exit(0 if ok else 1)
+    url = args[0]
+    name = args[1] if len(args) > 1 else _pkg_name_from_url(url)
+    manifest["dependencies"][name] = url
+    _save_manifest(project_dir, manifest)
+    ok = _install_one(project_dir, name, url)
+    sys.exit(0 if ok else 1)
+
+
+def cmd_uninstall(args):
+    if not args:
+        print("Uso: aresy uninstall <nome>")
+        sys.exit(1)
+    name = args[0]
+    project_dir = os.getcwd()
+    manifest = _load_manifest(project_dir)
+    if name in manifest["dependencies"]:
+        del manifest["dependencies"][name]
+        _save_manifest(project_dir, manifest)
+    dest = os.path.join(project_dir, PACKAGES_DIR, name)
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+        print(f"'{name}' removido.")
+    else:
+        print(f"'{name}' não estava instalado.")
+
+
+def cmd_list(args):
+    project_dir = os.getcwd()
+    manifest = _load_manifest(project_dir)
+    deps = manifest["dependencies"]
+    if not deps:
+        print("Nenhuma dependência declarada.")
+        return
+    for name, url in deps.items():
+        dest = os.path.join(project_dir, PACKAGES_DIR, name)
+        status = "instalado" if os.path.isdir(dest) else "FALTANDO (rode 'aresy install')"
+        print(f"  {name}  ->  {url}  [{status}]")
 
 
 class NativeError(Exception):
@@ -2196,6 +2341,10 @@ def _usage():
         "  aresy run programa.ay         mesma coisa, explícito\n"
         "  aresy build programa.ay [saida.ll] [--triple TRIPLE] [--no-gc]\n"
         "                                 gera LLVM IR pra compilar com clang na mão\n"
+        "  aresy install                 instala as dependências listadas em aresy.json\n"
+        "  aresy install <url-git> [nome] adiciona e instala uma dependência (tipo pip install)\n"
+        "  aresy uninstall <nome>        remove uma dependência\n"
+        "  aresy list                    lista as dependências e se estão instaladas\n"
         "  aresy --version               mostra a versão do compilador\n"
         "  aresy --help                  mostra esta ajuda\n"
         "  aresy --how                   mostra um resumo de toda a sintaxe da linguagem\n"
@@ -2231,6 +2380,12 @@ if __name__ == "__main__":
 
     if len(args) == 0:
         repl(target_triple=triple, use_gc=use_gc)
+    elif args[0] == "install":
+        cmd_install(args[1:])
+    elif args[0] == "uninstall":
+        cmd_uninstall(args[1:])
+    elif args[0] == "list":
+        cmd_list(args[1:])
     elif args[0] == "build":
         extra = args[1:] + (["--triple", triple] if triple else []) + ([] if use_gc else ["--no-gc"])
         _build_native(extra)
