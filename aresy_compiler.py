@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "0.4.0"
+VERSION = "0.6.0"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -148,6 +148,24 @@ Comentário: // até o fim da linha.
                                           // é só documentação — a função
                                           // já está disponível sem prefixo
                                           // também)
+
+    Bibliotecas que já vêm com o projeto (stdlib/):
+      mathx.ay    quadrado, cubo, potencia, fatorial, eh_primo,
+                  eh_par/eh_impar, mdc, mmc, clamp, media
+      strings.ay  eh_vazia, repetir, inverter, eh_palindromo, contem
+      numares.ay  arrays numéricos estilo NumPy (~70 funções) — arr[0]
+                  guarda o tamanho, elementos ficam em arr[1..n]:
+                    criação:    zeros(n) ones(n) full(n,v) arange(a,b,p)
+                                zeros_2d(r,c) ones_2d(r,c) eye(n)
+                    stats:      sum() mean() variance() std() median()
+                                amin() amax() argmin() argmax() ptp()
+                    elemento a elemento: add sub mul div mod_array
+                                scale square power abs_array clamp_array
+                    conjuntos:  unique isin intersect1d union1d setdiff1d
+                    forma:      sort argsort flip roll concat repeat tile
+                    matriz 2D:  transpose_2d matmul_2d det_2x2/3x3
+                                inv_2x2 solve_2x2 matvec_mul
+                  import "stdlib/numares.ay" pra usar.
 
 --- Rodando programas ---
     aresy                       modo interativo (REPL, nativo via clang)
@@ -709,6 +727,12 @@ class CodeGen:
         if isinstance(node, Call) and node.name in ("upper", "lower", "substr", "char_at", "str",
                                                       "read_line", "read_file"):
             return "str"
+        if isinstance(node, Call) and node.name in self.functions:
+            # função do usuário (ou extern) já registrada — usa o tipo de
+            # retorno real dela, em vez de cair no default 'i64'. Sem isso,
+            # "var x = minha_str_func(...)" era hoistado como i64 (chute
+            # errado) e depois batia de frente com o tipo real no codegen.
+            return self.functions[node.name].get("ret", "i64")
         if isinstance(node, BinOp): return self._guess_type(node.left)
         return "i64"
 
@@ -824,6 +848,40 @@ class CodeGen:
         header += BUILTIN_DECLARES + FMT_CONSTANTS + EXC_GLOBALS + "\n" + "\n".join(extern_ir) + "\n"
         return header + "\n".join(self.strings) + "\n" + "\n".join(body_ir)
 
+    def _collect_locals(self, body, out):
+        """Anda pelo corpo da função (entrando em if/while/try) coletando o
+        tipo de cada 'var' e cada variável de 'catch'. Usado pra hoistar
+        (mover pro início da função) todos os alloca — o LLVM exige que um
+        alloca sempre domine qualquer lugar onde é usado; um alloca dentro
+        de um bloco condicional (ex.: dentro de um 'catch') NÃO domina o
+        uso em outro ramo irmão (outro 'catch' ou outro 'if'), e o clang
+        rejeita isso como "Instruction does not dominate all uses"."""
+        for s in body:
+            if isinstance(s, VarDecl):
+                t = self._guess_type(s.expr)
+                if s.name in out:
+                    if (out[s.name] == "str") != (t == "str"):
+                        raise CompileError(
+                            f"'{s.name}' já foi declarada com outro tipo nesta função — "
+                            "não dá pra redeclarar com um tipo incompatível (str vs número)"
+                        )
+                else:
+                    out[s.name] = t
+            elif isinstance(s, If):
+                self._collect_locals(s.then_b, out)
+                self._collect_locals(s.else_b, out)
+            elif isinstance(s, While):
+                self._collect_locals(s.body, out)
+            elif isinstance(s, TryCatch):
+                self._collect_locals(s.try_body, out)
+                if s.catch_var in out and out[s.catch_var] != "str":
+                    raise CompileError(
+                        f"'{s.catch_var}' já existe nesta função com outro tipo — "
+                        "a variável de 'catch' é sempre str, escolhe outro nome"
+                    )
+                out.setdefault(s.catch_var, "str")
+                self._collect_locals(s.catch_body, out)
+
     def gen_function(self, node):
         env = {}
         lines = []
@@ -865,6 +923,18 @@ class CodeGen:
             lt = self.llvm_type(t)
             lines.append(f"  %{p} = alloca {lt}, align 8")
             lines.append(f"  store {lt} %arg_{i}, {lt}* %{p}, align 8")
+
+        # hoist: todo alloca de 'var'/'catch' do corpo inteiro nasce aqui,
+        # logo no início da função — garante que sempre domine qualquer uso,
+        # não importa em que ramo condicional a declaração de fato ocorra.
+        locals_types = {}
+        self._collect_locals(node.body, locals_types)
+        for name, t in locals_types.items():
+            if name in env:
+                continue  # já é parâmetro, não redeclara
+            lt = self.llvm_type(t)
+            lines.append(f"  %{name} = alloca {lt}, align 8")
+            env[name] = t
 
         for s in node.body:
             self.gen_stmt(s, env, lines, llvm_ret)
@@ -951,26 +1021,20 @@ class CodeGen:
     def gen_stmt(self, node, env, lines, func_ret_type):
         if isinstance(node, VarDecl):
             t, v = self.gen_expr(node.expr, env, lines)
-            lt = self.llvm_type(t)
-            if node.name in env:
-                # já existe um alloca com esse nome nesta função (duas
-                # declarações do mesmo nome em ramos irmãos de if/try/while,
-                # por exemplo) — reaproveita o registrador em vez de gerar
-                # "%nome = alloca" de novo, que o LLVM rejeita como
-                # "multiple definition of local value".
-                old_t = env[node.name]
-                if (old_t == "str") != (t == "str"):
-                    raise CompileError(
-                        f"'{node.name}' já foi declarada como {old_t} nesta função — "
-                        "não dá pra redeclarar com um tipo incompatível (str vs número)"
-                    )
-                if old_t != t:
-                    v = self.cast(lines, t, v, old_t)
-                t = old_t
-                lt = self.llvm_type(t)
-            else:
-                lines.append(f"  %{node.name} = alloca {lt}, align 8")
-            env[node.name] = t
+            # o alloca já foi feito no início da função (hoist, ver
+            # gen_function/_collect_locals) — aqui só converte pro tipo já
+            # fixado e guarda o valor. Isso garante que o registrador sempre
+            # "domine" qualquer uso, mesmo quando a declaração está dentro
+            # de um if/while/try condicional.
+            target_t = env.get(node.name, t)
+            if (target_t == "str") != (t == "str"):
+                raise CompileError(
+                    f"'{node.name}' já foi declarada como {target_t} nesta função — "
+                    "não dá pra redeclarar com um tipo incompatível (str vs número)"
+                )
+            v = self.cast(lines, t, v, target_t)
+            lt = self.llvm_type(target_t)
+            env[node.name] = target_t
             lines.append(f"  store {lt} {v}, {lt}* %{node.name}, align 8")
 
         elif isinstance(node, Assign):
@@ -1069,18 +1133,7 @@ class CodeGen:
             # zera a flag (a exceção foi capturada aqui) e expõe a mensagem
             # na variável declarada em "catch <nome>" (sempre tipo str).
             lines.append("  store i32 0, i32* @__ares_exc_flag")
-            if node.catch_var in env:
-                # nome já usado nesta função (outro "catch" com o mesmo nome,
-                # ou um parâmetro/var). Se não for str, não dá pra reaproveitar
-                # o registrador com segurança — erro claro em vez de IR
-                # corrompido; se já for str (outro catch anterior), reusa.
-                if env[node.catch_var] != "str":
-                    raise CompileError(
-                        f"'{node.catch_var}' já existe nesta função com outro tipo — "
-                        "a variável de 'catch' é sempre str, escolhe outro nome"
-                    )
-            else:
-                lines.append(f"  %{node.catch_var} = alloca i8*, align 8")
+            # alloca já foi feita no início da função (hoist)
             lines.append(f"  %excmsg_{uid} = load i8*, i8** @__ares_exc_msg")
             lines.append(f"  store i8* %excmsg_{uid}, i8** %{node.catch_var}, align 8")
             env[node.catch_var] = "str"
@@ -1891,6 +1944,19 @@ class ReplSession:
             env[name] = t
 
         newly_non_persistent = []
+
+        # hoist (mesmo motivo do gen_function): VarDecl não gera mais seu
+        # próprio alloca, então as variáveis novas deste round precisam ser
+        # pré-alocadas aqui antes de qualquer statement rodar.
+        locals_types = {}
+        self.codegen._collect_locals(new_stmts, locals_types)
+        for name, t in locals_types.items():
+            if name in env:
+                continue  # já existe (reinjetada de round anterior)
+            lt = self.codegen.llvm_type(t)
+            lines.append(f"  %{name} = alloca {lt}, align 8")
+            env[name] = t
+
         for s in new_stmts:
             if isinstance(s, VarDecl):
                 if s.name in env:
@@ -2037,7 +2103,7 @@ def repl(target_triple=None, use_gc=True):
 def compile_source(source, target_triple=None, use_gc=True, source_path=None):
     """Retorna (ir_llvm, lista_de_libs_importadas).
 
-    source_path, when informado, é usado como base pra resolver imports
+    source_path, quando informado, é usado como base pra resolver imports
     relativos de biblioteca .ay (ex.: import "stdlib/mathx.ay" a partir de
     onde o arquivo principal está, não do diretório em que o `aresy` foi
     chamado)."""

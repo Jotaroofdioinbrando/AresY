@@ -145,15 +145,34 @@ fn main() {
 
 Regras: bibliotecas importadas não podem ter `main()`; um mesmo arquivo só
 é trazido uma vez mesmo se importado por caminhos diferentes do grafo de
-imports (evita duplicação e import circular). O projeto já vem com duas
+imports (evita duplicação e import circular). O projeto já vem com três
 bibliotecas em `stdlib/`:
 
 - `stdlib/mathx.ay` — `quadrado`, `cubo`, `potencia`, `fatorial`,
   `eh_primo`, `eh_par`/`eh_impar`, `mdc`, `mmc`, `clamp`, `media`
 - `stdlib/strings.ay` — `eh_vazia`, `repetir`, `inverter`,
   `eh_palindromo`, `contem`
+- `stdlib/numares.ay` — arrays numéricos estilo NumPy, ~70 funções.
+  Convenção: `arr[0]` guarda o tamanho, os elementos ficam em
+  `arr[1..n]` (assim as funções sabem o tamanho sem precisar receber
+  como parâmetro separado). Cobre desde o básico (`zeros`, `ones`,
+  `arange`, `sum`, `mean`, `std`, `sort`, `unique`) até operações de
+  matriz 2D (`matmul_2d`, `transpose_2d`, `det_2x2`/`det_3x3`,
+  `inv_2x2`, `solve_2x2`, `matvec_mul`). Exemplo:
+  ```
+  import "stdlib/numares.ay"
 
-Veja `exemplo_stdlib.ay` pra um exemplo completo usando as duas.
+  fn main() {
+      var a = zeros(5)
+      var b = ones(5)
+      var c = add(a, b)
+      print(sum(c))      // 5
+      print(mean(c))      // 1.0
+      return 0
+  }
+  ```
+
+Veja `exemplo_stdlib.ay` pra um exemplo completo usando `mathx`/`strings`.
 
 ## Coletor de lixo (GC)
 
@@ -185,6 +204,25 @@ usava só `malloc` puro e nunca liberava nada).
 - **`import geometria` / `modulo.funcao(...)`** — a sintaxe já existia nos
   exemplos do projeto (`main.ay`/`geometria.ay`) mas não compilava: faltava
   o `.` no lexer e o parser não entendia chamada qualificada por módulo.
+- **"Instruction does not dominate all uses"** — `var` (ou a variável de
+  `catch`) declarada dentro de um `if`/`try` e reaproveitada em outro ramo
+  irmão (ex.: dois `catch e` diferentes na mesma função) gerava um
+  `alloca` que o LLVM rejeitava, porque o registrador só existia dentro de
+  um branch específico e não "dominava" o outro. Corrigido hoistando
+  (movendo) todo `alloca` de variável local pro início da função, antes de
+  qualquer `if`/`while`/`try` — é o mesmo jeito que o clang gera código
+  pra variáveis locais em C.
+- **`-lm` duplicado na hora de linkar** quando o programa faz
+  `import "m"` explicitamente (libm já é linkada por padrão em todo
+  programa, com ou sem esse import).
+- **Escape de string corrompia UTF-8** — `"coração"` virava lixo tipo
+  `"coraÃ§Ã£o"` porque o decode antigo (`unicode_escape`) tratava cada byte
+  como um caractere Latin-1 antes de reaplicar os escapes. Trocado por
+  `codecs.escape_decode`, que preserva UTF-8 multi-byte corretamente.
+- **Divisão por zero crashava o binário** (`SIGFPE` em `i64`, `inf`/`nan`
+  silencioso em `double`) — agora as duas viram uma exceção catchável
+  (`throw "divisao por zero"`), consistente com o resto do mecanismo de
+  `try`/`catch`.
 
 ## Limitações atuais
 
