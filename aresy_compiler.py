@@ -38,7 +38,7 @@ import re
 import struct
 import math as _pymath
 
-VERSION = "1.5.2"
+VERSION = "1.6.0"
 
 HOW_TEXT = """\
 aresY — resumo rápido da sintaxe (aresy --how)
@@ -569,6 +569,42 @@ class Parser:
             raw += "[]"
         return parse_type_spec_from_name(raw)
 
+    def _peek_is_compound_assign(self):
+        """Olha pra frente (sem consumir nada) pra ver se o que vem por aí
+        é um alvo de atribuição — 'nome', 'nome[idx]', 'nome.campo',
+        'nome.campo[idx]', ou qualquer combinação encadeada dessas duas
+        coisas — seguido de um '=' de verdade (não '==').  Sem isso,
+        'g.v[i] = valor' (atribuir um campo-array de um struct) não tinha
+        como ser reconhecido como atribuição: o parser via 'g.v[i]' como
+        uma EXPRESSÃO de leitura e sobrava um '=' solto, que estourava
+        como 'Token inesperado' na tentativa de parsear o statement
+        seguinte."""
+        save = self.pos
+        try:
+            if self.peek().kind != "ID":
+                return False
+            self.advance()
+            while True:
+                if self.peek().value == "." and self.peek(1).kind == "ID":
+                    self.advance(); self.advance()
+                elif self.peek().value == "[":
+                    self.advance()
+                    depth = 1
+                    while depth > 0:
+                        if self.peek().kind == "EOF":
+                            return False
+                        v = self.peek().value
+                        if v == "[":
+                            depth += 1
+                        elif v == "]":
+                            depth -= 1
+                        self.advance()
+                else:
+                    break
+            return self.peek().value == "="
+        finally:
+            self.pos = save
+
     def parse_simple_statement(self):
         tok = self.peek()
         if tok.kind == "VAR":
@@ -581,29 +617,30 @@ class Parser:
             self.expect("OP")  # =
             expr = self.parse_expr()
             return VarDecl(name, expr, decl_type=decl_type)
-        if tok.kind == "ID" and self.peek(1).value == "=":
+        if tok.kind == "ID" and self._peek_is_compound_assign():
             name = self.advance().value
-            self.advance()
-            return Assign(name, self.parse_expr())
-        if tok.kind == "ID" and self.peek(1).value == "[":
-            name = self.advance().value
-            indices = []
-            while self.peek().value == "[":
-                self.advance()
-                indices.append(self.parse_expr())
-                self.expect("OP")
-            base = Var(name)
-            if self.peek().value == "=":
-                self.advance()
-                expr = self.parse_expr()
-                target = base
-                for idx in indices[:-1]:
-                    target = IndexGet(target, idx)
-                return IndexSet(target, indices[-1], expr)
-            node = base
-            for idx in indices:
-                node = IndexGet(node, idx)
-            return ExprStmt(node)
+            chain = []  # [("field", nome) | ("index", expr_no)]
+            while self.peek().value in (".", "["):
+                if self.peek().value == ".":
+                    self.advance()
+                    field = self.expect("ID").value
+                    chain.append(("field", field))
+                else:
+                    self.advance()
+                    idx = self.parse_expr()
+                    self.expect("OP")  # ]
+                    chain.append(("index", idx))
+            self.expect("OP")  # =
+            expr = self.parse_expr()
+            if not chain:
+                return Assign(name, expr)
+            target = Var(name)
+            for kind, val in chain[:-1]:
+                target = FieldGet(target, val) if kind == "field" else IndexGet(target, val)
+            last_kind, last_val = chain[-1]
+            if last_kind == "field":
+                return FieldSet(target, last_val, expr)
+            return IndexSet(target, last_val, expr)
         expr = self.parse_expr()
         return ExprStmt(expr)
 
@@ -697,7 +734,7 @@ class Parser:
             expr = self.parse_expr()
             self.expect("OP")
             return Print(expr)
-        if tok.kind == "ID" and self.peek(1).value in ("=", "["):
+        if tok.kind == "ID" and self._peek_is_compound_assign():
             return self.parse_simple_statement()
         return ExprStmt(self.parse_expr())
 
