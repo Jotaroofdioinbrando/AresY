@@ -55,6 +55,7 @@ Comentário: // até o fim da linha.
     i64             inteiro 64 bits (padrão pra números sem ponto)
     double (ou f64) ponto flutuante 64 bits
     str (ou string) texto
+    bool / i1       booleano
     void            só usado em retorno de função / extern
 
 --- Funções ---
@@ -71,7 +72,9 @@ Comentário: // até o fim da linha.
 --- Controle de fluxo ---
     if cond { ... } else { ... }        // "else" é opcional
     while cond { ... }
+    for init; cond; post { ... }
     break                                // sai imediatamente do loop mais interno
+    continue                             // pula pra próxima iteração
     return expr                          // ou "return" sozinho (void)
 
 --- Operadores ---
@@ -85,7 +88,7 @@ Comentário: // até o fim da linha.
     3.14            float
     1e-7, 2.5E10    float em notação científica
     "texto"         string (aceita \\n \\t \\" \\\\ etc.)
-    true / false    booleano (vira 1/0 internamente)
+    true / false    booleano (vira i1; i64 também vira bool em condições)
 
 --- Strings ---
     a + b                    concatenação
@@ -96,11 +99,23 @@ Comentário: // até o fim da linha.
     char_at(s, i)             caractere na posição i (como string de 1)
     str(numero)               converte i64/double pra string
 
---- Arrays (só de i64, tamanho fixo) ---
+--- Arrays, matrizes e structs ---
     var arr = array(5)        // aloca 5 posições
     arr[0] = 42
     print(arr[0])
-    // não tem bounds checking — cuidado com índice fora do intervalo
+    // array(n) é i64 fixo, sem bounds checking.
+    var xs: double[] = darray(4)
+    var ms: double[][] = dmat(2, 3)
+    var prod: double[][] = matmul(ms, dmat(3, 2))
+
+    struct Ponto { x: double, y: double }
+    var p = Ponto { x: 1.0, y: 2.0 }
+    print(p.x)
+
+--- Structs ---
+    struct Nome { campo: tipo, outro: tipo }
+    var n = Nome { campo: 10, outro: 3.14 }
+    print(n.campo)
 
 --- Exceções ---
     fn divide(a, b) {
@@ -124,6 +139,9 @@ Comentário: // até o fim da linha.
                  from_raw(i64) -> double  converte) — pra guardar double
                                            dentro de um array (que só
                                            guarda i64 por posição)
+    Arrays nativos: darray(n) -> double[]  (comprimento + dados)
+                    dmat(r,c) -> double[][]
+                    matmul(a,b) -> double[][] (otimizado no compilador)
     Tempo:       time() -> segundos desde epoch (double)
                  sleep(segundos) -> pausa a execução (aceita float)
     Aleatório:   random(n) -> inteiro entre 0 e n-1

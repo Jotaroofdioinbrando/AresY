@@ -3,11 +3,12 @@
 Linguagem aresY: sintaxe própria, compila pra LLVM IR e usa o `clang` como
 backend (binário nativo de verdade, não interpretado).
 
-Tipos (`i64`/`double`/`str`), funções com anotação de tipo opcional,
-arrays, `try`/`catch`/`throw`, ponteiro de função, `extern fn` (chama
-biblioteca C), sistema de `import` de arquivos `.ay`, coletor de lixo
-(Boehm GC) e um gerenciador de pacotes (`aresy install`) pra puxar
-bibliotecas de terceiros.
+Tipos (`i64`/`double`/`str`/`bool`), `struct` com campos nomeados,
+arrays nativos de `double`, funções com anotação de tipo opcional,
+`try`/`catch`/`throw`, ponteiro de função, `extern fn` (chama biblioteca
+C), sistema de `import` de arquivos `.ay`, coletor de lixo (Boehm GC) e
+um gerenciador de pacotes (`aresy install`) pra puxar bibliotecas de
+terceiros.
 
 ## Instalar o comando `aresy` no Termux
 
@@ -100,7 +101,7 @@ fn main() {
     if x > 5 { print("grande") } else { print("pequeno") }
 
     var i = 0
-    while i < 3 { print(i); i = i + 1 }
+    for i = 0; i < 3; i = i + 1 { print(i) }
 
     try {
         if x == 0 { throw "x não pode ser zero" }
@@ -113,14 +114,18 @@ fn main() {
 ```
 
 - `var x = expr` — declaração; `x = expr` — reatribuição
-- `if cond { } else { }`, `while cond { }`, `return expr`
+- `if cond { } else { }`, `while cond { }`, `for init; cond; post { }`,
+  `break`, `continue`, `return expr`
 - Aritmética `+ - * / %`, comparação `== != < > <= >=`, bitwise `& | ^`
   (só com inteiros), unário `-`
-- `true` / `false`
+- `true` / `false` (`bool`/`i1`; `i64` também vira booleano em condições)
 - Strings: concatenação com `+`, `==`/`!=` por conteúdo, `len(s)`,
   `upper(s)`, `lower(s)`, `substr(s, i, tam)`, `char_at(s, i)`, `str(n)`
-- Arrays: `array(n)` (só `i64`, sem bounds checking, sem `free` — o GC
-  cuida da memória se estiver ligado)
+- Arrays: `array(n)` continua sendo `i64` fixo, sem bounds checking e
+  sem `free` explícito; `darray(n)` cria `double[]` nativo e `dmat(r,c)`
+  cria `double[][]` nativo para uso com `matmul(a,b)`
+- Structs: `struct Nome { campo: tipo, ... }` com acesso por ponto e
+  literal `Nome { campo: valor, ... }`
 - `try { } catch e { }` / `throw expr` — exceções propagam pela pilha de
   chamadas até o catch mais próximo; `e` dentro do catch é sempre `str`
 - `extern fn nome(tipos) -> tipo` + `import "libc_ou_nome_da_lib"` —
@@ -133,6 +138,7 @@ fn main() {
   bits (não converte o valor); serve pra guardar `double` dentro de um
   `array`, que só guarda `i64` por posição (é assim que `numares.ay`
   implementa os arrays "_d" de ponto flutuante)
+- Builtins nativos: `darray(n)`, `dmat(r,c)`, `matmul(a,b)`
 
 ## Bibliotecas nativas em .ay (import de módulo)
 
@@ -436,6 +442,9 @@ usava só `malloc` puro e nunca liberava nada).
   silencioso em `double`) — agora as duas viram uma exceção catchável
   (`throw "divisao por zero"`), consistente com o resto do mecanismo de
   `try`/`catch`.
+- **`matmul(a, b)` nativo para `double[][]`** — o compilador agora
+  reconhece o layout nativo de matriz 2D em `double` e gera o laço de
+  multiplicação direto em LLVM IR, sem depender da stdlib.
 
 ## Limitações atuais
 
@@ -443,7 +452,8 @@ usava só `malloc` puro e nunca liberava nada).
   função como argumento (callback) assume sempre `i64` — sem checagem de
   tipo real entre o que foi passado e como é chamado.
 - Arrays não têm bounds checking; só guardam `i64`.
-- Sem structs/tipos compostos ainda.
+- `array(n)` continua sendo `i64` puro; `darray`/`dmat` cobrem os casos
+  nativos de `double`.
 - Sem interpolação/f-strings — concatenação com `+` cobre o caso básico.
 - `import "arquivo.ay"` não tem namespace de verdade: tudo que a
   biblioteca declara no topo do arquivo entra no escopo global de quem
