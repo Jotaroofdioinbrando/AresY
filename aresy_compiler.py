@@ -309,24 +309,85 @@ TOKEN_SPEC = [
     ("STRING",   r'"(?:\\.|[^"\\])*"'),
     ("ID",       r"[A-Za-z_][A-Za-z0-9_]*"),
     ("COMMENT",  r"//.*"),
-    ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~:.]"),
+    ("OP",       r"->|==|!=|<=|>=|[+\-*/%=<>(){}\[\],^&|~:.;]"),
     ("NEWLINE",  r"\n"),
     ("SKIP",     r"[ \t]+"),
 ]
 MASTER_RE = re.compile("|".join(f"(?P<{n}>{p})" for n, p in TOKEN_SPEC))
 KEYWORDS = {"fn", "if", "else", "while", "return", "print", "var", "true", "false",
-            "extern", "import", "try", "catch", "throw", "break"}
+            "extern", "import", "try", "catch", "throw", "break", "for", "continue",
+            "struct"}
 
 # Nomes de tipo aceitos em anotações (fn e extern). Mapeiam pro vocabulário
 # interno do compilador: "i64", "double", "str", "void".
 TYPE_ALIASES = {
     "i64": "i64",
+    "i1": "i1",
+    "bool": "i1",
+    "boolean": "i1",
     "f64": "double",
     "double": "double",
     "str": "str",
     "string": "str",
     "void": "void",
 }
+
+
+def parse_type_spec_from_name(raw):
+    """Converte um nome de tipo opcionalmente com sufixos de array em uma
+    representação estruturada.
+
+    Exemplos:
+      i64        -> "i64"
+      double[]   -> ("array", "double", 1)
+      Foo[][]    -> ("array", ("struct", "Foo"), 2)
+    """
+    if not raw:
+        raise SyntaxError("Nome de tipo vazio")
+    rank = raw.count("[]")
+    base = raw.replace("[]", "")
+    if base in TYPE_ALIASES:
+        t = TYPE_ALIASES[base]
+    else:
+        t = ("struct", base)
+    if rank:
+        return ("array", t, rank)
+    return t
+
+
+def type_spec_to_text(t):
+    if isinstance(t, tuple):
+        if not t:
+            return "<vazio>"
+        if t[0] == "struct":
+            return t[1]
+        if t[0] == "array":
+            return type_spec_to_text(t[1]) + "[]" * t[2]
+    return str(t)
+
+
+def is_array_type(t):
+    return isinstance(t, tuple) and len(t) >= 3 and t[0] == "array"
+
+
+def array_base_type(t):
+    return t[1] if is_array_type(t) else None
+
+
+def array_rank(t):
+    return t[2] if is_array_type(t) else 0
+
+
+def is_struct_type(t):
+    return isinstance(t, tuple) and len(t) == 2 and t[0] == "struct"
+
+
+def is_opaque_type(t):
+    return is_array_type(t) or is_struct_type(t)
+
+
+def types_compatible(lhs, rhs):
+    return lhs == rhs
 
 
 def resolve_type_name(raw):
@@ -421,12 +482,29 @@ class ExternDecl:
         self.name, self.param_types, self.ret_type = name, param_types, ret_type
 class ImportDecl:
     def __init__(self, name): self.name = name
+class StructDef:
+    def __init__(self, name, fields):
+        self.name, self.fields = name, fields
+class StructLiteral:
+    def __init__(self, name, fields):
+        self.name, self.fields = name, fields
+class FieldGet:
+    def __init__(self, base, field):
+        self.base, self.field = base, field
+class FieldSet:
+    def __init__(self, base, field, expr):
+        self.base, self.field, self.expr = base, field, expr
+class For:
+    def __init__(self, init, cond, post, body):
+        self.init, self.cond, self.post, self.body = init, cond, post, body
 class TryCatch:
     def __init__(self, try_body, catch_var, catch_body):
         self.try_body, self.catch_var, self.catch_body = try_body, catch_var, catch_body
 class Throw:
     def __init__(self, expr): self.expr = expr
 class Break:
+    pass
+class Continue:
     pass
 
 
@@ -437,6 +515,7 @@ class Break:
 class Parser:
     def __init__(self, tokens):
         self.tokens, self.pos = tokens, 0
+        self.known_structs = set()
 
     def peek(self, offset=0): return self.tokens[self.pos + offset]
     def advance(self):
@@ -448,6 +527,9 @@ class Parser:
         return t
 
     def parse_program(self):
+        for i, tok in enumerate(self.tokens[:-1]):
+            if tok.kind == "STRUCT" and i + 1 < len(self.tokens) and self.tokens[i + 1].kind == "ID":
+                self.known_structs.add(self.tokens[i + 1].value)
         stmts = []
         while self.peek().kind != "EOF":
             stmts.append(self.parse_statement())
@@ -460,6 +542,56 @@ class Parser:
             stmts.append(self.parse_statement())
         self.expect("OP")  # }
         return stmts
+
+    def parse_type(self):
+        raw = self.expect("ID").value
+        while self.peek().value == "[" and self.peek(1).value == "]":
+            self.advance()
+            self.advance()
+            raw += "[]"
+        return parse_type_spec_from_name(raw)
+
+    def parse_simple_statement(self):
+        tok = self.peek()
+        if tok.kind == "VAR":
+            self.advance()
+            name = self.expect("ID").value
+            decl_type = None
+            if self.peek().value == ":":
+                self.advance()
+                decl_type = self.parse_type()
+            self.expect("OP")  # =
+            expr = self.parse_expr()
+            return VarDecl(name, expr, decl_type=decl_type)
+        if tok.kind == "ID" and self.peek(1).value == "=":
+            name = self.advance().value
+            self.advance()
+            return Assign(name, self.parse_expr())
+        if tok.kind == "ID" and self.peek(1).value == "[":
+            name = self.advance().value
+            indices = []
+            while self.peek().value == "[":
+                self.advance()
+                indices.append(self.parse_expr())
+                self.expect("OP")
+            base = Var(name)
+            if self.peek().value == "=":
+                self.advance()
+                expr = self.parse_expr()
+                target = base
+                for idx in indices[:-1]:
+                    target = IndexGet(target, idx)
+                return IndexSet(target, indices[-1], expr)
+            node = base
+            for idx in indices:
+                node = IndexGet(node, idx)
+            return ExprStmt(node)
+        expr = self.parse_expr()
+        return ExprStmt(expr)
+
+    def parse_until(self, stop_value):
+        stmt = self.parse_simple_statement()
+        return stmt
 
     EXTERN_TYPES = {"i64", "f64", "void"}
 
@@ -501,6 +633,7 @@ class Parser:
         if tok.kind == "FN": return self.parse_funcdef()
         if tok.kind == "IF": return self.parse_if()
         if tok.kind == "WHILE": return self.parse_while()
+        if tok.kind == "FOR": return self.parse_for()
         if tok.kind == "TRY": return self.parse_try()
         if tok.kind == "THROW":
             self.advance()
@@ -508,14 +641,31 @@ class Parser:
         if tok.kind == "BREAK":
             self.advance()
             return Break()
+        if tok.kind == "CONTINUE":
+            self.advance()
+            return Continue()
+        if tok.kind == "STRUCT":
+            self.advance()
+            name = self.expect("ID").value
+            self.known_structs.add(name)
+            self.expect("OP")  # {
+            fields = []
+            while self.peek().value != "}":
+                fname = self.expect("ID").value
+                self.expect("OP")  # :
+                ftype = self.parse_type()
+                fields.append((fname, ftype))
+                if self.peek().value == ",":
+                    self.advance()
+            self.expect("OP")  # }
+            return StructDef(name, fields)
         if tok.kind == "VAR":
             self.advance()
             name = self.expect("ID").value
             decl_type = None
             if self.peek().value == ":":
                 self.advance()
-                traw = self.expect("ID").value
-                decl_type = resolve_type_name(traw)
+                decl_type = self.parse_type()
             self.expect("OP")  # =
             expr = self.parse_expr()
             return VarDecl(name, expr, decl_type=decl_type)
@@ -529,29 +679,8 @@ class Parser:
             expr = self.parse_expr()
             self.expect("OP")
             return Print(expr)
-        if tok.kind == "ID" and self.peek(1).value == "=":
-            name = self.advance().value
-            self.advance()
-            return Assign(name, self.parse_expr())
-        if tok.kind == "ID" and self.peek(1).value == "[":
-            name = self.advance().value
-            indices = []
-            while self.peek().value == "[":
-                self.advance()  # [
-                indices.append(self.parse_expr())
-                self.expect("OP")  # ]
-            base = Var(name)
-            if self.peek().value == "=":
-                self.advance()  # =
-                expr = self.parse_expr()
-                target = base
-                for idx in indices[:-1]:
-                    target = IndexGet(target, idx)
-                return IndexSet(target, indices[-1], expr)
-            node = base
-            for idx in indices:
-                node = IndexGet(node, idx)
-            return ExprStmt(node)
+        if tok.kind == "ID" and self.peek(1).value in ("=", "["):
+            return self.parse_simple_statement()
         return ExprStmt(self.parse_expr())
 
     def parse_funcdef(self):
@@ -565,8 +694,7 @@ class Parser:
             ptype = None  # None = sem anotação (decidido depois: inferência leve ou i64)
             if self.peek().value == ":":
                 self.advance()
-                traw = self.expect("ID").value
-                ptype = resolve_type_name(traw)
+                ptype = self.parse_type()
             params.append(pname)
             param_types.append(ptype)
             if self.peek().value == ",": self.advance()
@@ -574,8 +702,7 @@ class Parser:
         ret_type = None
         if self.peek().value == "->":
             self.advance()
-            traw = self.expect("ID").value
-            ret_type = resolve_type_name(traw)
+            ret_type = self.parse_type()
         body = self.parse_block()
         return FuncDef(name, params, body, param_types=param_types, ret_type=ret_type)
 
@@ -594,6 +721,22 @@ class Parser:
         cond = self.parse_expr()
         body = self.parse_block()
         return While(cond, body)
+
+    def parse_for(self):
+        self.advance()
+        init = None
+        cond = None
+        post = None
+        if self.peek().value != ";":
+            init = self.parse_simple_statement()
+        self.expect("OP")  # ;
+        if self.peek().value != ";":
+            cond = self.parse_expr()
+        self.expect("OP")  # ;
+        if self.peek().value != "{":
+            post = self.parse_simple_statement()
+        body = self.parse_block()
+        return For(init, cond, post, body)
 
     def parse_try(self):
         self.advance()  # try
@@ -660,13 +803,32 @@ class Parser:
                 # "#include"), então aqui a gente só usa o nome real.
                 self.advance()  # .
                 real_name = self.advance().value
-                if self.peek().value != "(":
-                    raise SyntaxError(
-                        f"Esperado uma chamada de função depois de '{name}.{real_name}' "
-                        "— acessar uma variável de outro módulo (tipo 'modulo.x' sem "
-                        "parênteses) ainda não é suportado"
-                    )
-                name = real_name
+                if self.peek().value == "(":
+                    name = real_name
+                else:
+                    node = FieldGet(Var(name), real_name)
+                    while self.peek().value == "." and self.peek(1).kind == "ID":
+                        self.advance()
+                        field = self.advance().value
+                        node = FieldGet(node, field)
+                    while self.peek().value == "[":
+                        self.advance()
+                        idx = self.parse_expr()
+                        self.expect("OP")
+                        node = IndexGet(node, idx)
+                    return node
+            if self.peek().value == "{" and name in self.known_structs:
+                self.advance()
+                fields = []
+                while self.peek().value != "}":
+                    fname = self.expect("ID").value
+                    self.expect("OP")
+                    fexpr = self.parse_expr()
+                    fields.append((fname, fexpr))
+                    if self.peek().value == ",":
+                        self.advance()
+                self.expect("OP")
+                return StructLiteral(name, fields)
             if self.peek().value == "(":
                 self.advance()
                 args = []
@@ -676,12 +838,30 @@ class Parser:
                 self.expect("OP")
                 return Call(name, args)
             node = Var(name)
+            while self.peek().value == "." and self.peek(1).kind == "ID":
+                self.advance()
+                field = self.advance().value
+                node = FieldGet(node, field)
             while self.peek().value == "[":
                 self.advance()
                 idx = self.parse_expr()
                 self.expect("OP")
                 node = IndexGet(node, idx)
             return node
+        if tok.kind == "STRUCT":
+            self.advance()
+            name = self.expect("ID").value
+            self.expect("OP")  # {
+            fields = []
+            while self.peek().value != "}":
+                fname = self.expect("ID").value
+                self.expect("OP")  # :
+                fexpr = self.parse_expr()
+                fields.append((fname, fexpr))
+                if self.peek().value == ",":
+                    self.advance()
+            self.expect("OP")  # }
+            return StructLiteral(name, fields)
         if tok.value == "(":
             self.advance()
             e = self.parse_expr()
@@ -740,6 +920,7 @@ BUILTIN_DECLARES = (
     'declare i64 @ftell(i8*)\n'
     'declare i64 @fread(i8*, i64, i64, i8*)\n'
     'declare i64 @fwrite(i8*, i64, i64, i8*)\n'
+    'declare i64 @getrandom(i8*, i64, i32)\n'
 )
 FMT_CONSTANTS = (
     '@fmt_int = private unnamed_addr constant [5 x i8] c"%ld\\0A\\00"\n'
@@ -808,11 +989,12 @@ class CodeGen:
         self.use_gc = use_gc
         self.counter = 0
         self.strings = []
-        self.functions = {}   # name -> {'params': [...], 'ret': 'i64'|'double'|'void', 'extern': bool}
+        self.functions = {}   # name -> {'params': [...], 'ret': tipo, 'extern': bool}
+        self.structs = {}      # nome -> [(campo, tipo), ...]
         self.imports = []     # nomes de libs de "import" (viram -lNOME na hora de linkar)
         self.catch_stack = []      # labels dos catch ativos (mais interno primeiro), por função
         self.func_exc_exit = None  # label pra onde pular se uma exceção escapar de todo try da função atual
-        self.loop_stack = []
+        self.loop_stack = []       # pilha de (continue_label, break_label)
 
     def new_id(self):
         self.counter += 1
@@ -821,7 +1003,90 @@ class CodeGen:
     def llvm_type(self, t):
         # "str" é rastreado internamente como tipo próprio, mas em LLVM
         # é sempre um ponteiro i8* (C string terminada em \0).
-        return "i8*" if t == "str" else t
+        if t == "str":
+            return "i8*"
+        if is_array_type(t) or is_struct_type(t):
+            return "i8*"
+        return t
+
+    def type_name(self, t):
+        return type_spec_to_text(t)
+
+    def _struct_field_index(self, struct_name, field):
+        if struct_name not in self.structs:
+            raise CompileError(f"Struct '{struct_name}' não foi declarada")
+        for idx, (fname, _) in enumerate(self.structs[struct_name]):
+            if fname == field:
+                return idx
+        raise CompileError(f"Struct '{struct_name}' não possui o campo '{field}'")
+
+    def _struct_field_type(self, struct_name, field):
+        idx = self._struct_field_index(struct_name, field)
+        return self.structs[struct_name][idx][1]
+
+    def _default_zero(self, t):
+        if t == "double":
+            return "0.0"
+        if t == "i1":
+            return "0"
+        if t == "void":
+            return None
+        if t == "str" or is_opaque_type(t):
+            return "null"
+        return "0"
+
+    def _is_truthy_type(self, t):
+        return t in ("i64", "i32", "i1", "double") or t == "str" or is_opaque_type(t)
+
+    def _to_bool(self, lines, t, v):
+        if t == "i1":
+            return v
+        uid = self.new_id()
+        if t == "double":
+            lines.append(f"  %bool_{uid} = fcmp une double {v}, 0.0")
+        elif t == "str" or is_opaque_type(t):
+            lines.append(f"  %bool_{uid} = icmp ne i8* {v}, null")
+        else:
+            v = self.cast(lines, t, v, "i64")
+            lines.append(f"  %bool_{uid} = icmp ne i64 {v}, 0")
+        return f"%bool_{uid}"
+
+    def _type_compatible(self, expected, got):
+        if expected == got:
+            return True
+        if expected == "i1" and got == "i64":
+            return True
+        if expected == "i64" and got == "i1":
+            return True
+        if expected == "double" and got == "i1":
+            return True
+        if expected == "double" and got == "i64":
+            return True
+        if expected == "i64" and got == "double":
+            return True
+        return False
+
+    def _validate_type_spec(self, t, _seen=None):
+        if _seen is None:
+            _seen = set()
+        if t is None:
+            return
+        if t in ("i64", "i32", "i1", "double", "str", "void"):
+            return
+        if is_struct_type(t):
+            if t[1] in _seen:
+                return
+            if t[1] not in self.structs:
+                raise CompileError(f"Tipo struct '{t[1]}' não foi declarado")
+            _seen.add(t[1])
+            for _, field_t in self.structs[t[1]]:
+                self._validate_type_spec(field_t, _seen)
+            _seen.remove(t[1])
+            return
+        if is_array_type(t):
+            self._validate_type_spec(t[1], _seen)
+            return
+        raise CompileError(f"Tipo inválido: {self.type_name(t)}")
 
     # --- pré-varredura: adivinha o tipo de retorno de cada função pro header ---
     def _scan_return_type(self, body):
@@ -850,12 +1115,25 @@ class CodeGen:
         known = known or {}
         if isinstance(node, Num): return "double" if node.is_float else "i64"
         if isinstance(node, Str): return "str"
+        if isinstance(node, StructLiteral):
+            return ("struct", node.name)
+        if isinstance(node, FieldGet):
+            base_t = self._guess_type(node.base, known)
+            if is_struct_type(base_t):
+                return self._struct_field_type(base_t[1], node.field)
+            return "i64"
         if isinstance(node, Var): return known.get(node.name, "i64")
         if isinstance(node, Call) and node.name in (
             "sqrt", "time", "sin", "cos", "tan", "atan", "atan2",
             "log", "log10", "exp", "floor", "ceil", "pow", "pi", "from_raw",
         ):
             return "double"
+        if isinstance(node, Call) and node.name in ("darray", "dmat", "arrayd", "arrayd2"):
+            if node.name in ("dmat", "arrayd2"):
+                return ("array", "double", 2)
+            return ("array", "double", 1)
+        if isinstance(node, Call) and node.name == "matmul":
+            return ("array", "double", 2)
         if isinstance(node, Call) and node.name in ("abs", "min", "max"):
             # polimórficas (i64 ou double, dependendo do argumento) — usa o
             # tipo adivinhado do primeiro argumento, mesma lógica do codegen
@@ -967,6 +1245,8 @@ class CodeGen:
                 walk_expr(e.operand)
             elif isinstance(e, IndexGet):
                 walk_expr(e.arr); walk_expr(e.idx)
+            elif isinstance(e, FieldGet):
+                walk_expr(e.base)
 
         def walk_stmt(s):
             if found["str"]:
@@ -975,6 +1255,8 @@ class CodeGen:
                 walk_expr(s.expr)
             elif isinstance(s, IndexSet):
                 walk_expr(s.arr); walk_expr(s.idx); walk_expr(s.expr)
+            elif isinstance(s, FieldSet):
+                walk_expr(s.base); walk_expr(s.expr)
             elif isinstance(s, Print):
                 walk_expr(s.expr)
             elif isinstance(s, If):
@@ -993,6 +1275,13 @@ class CodeGen:
                 if s.expr is not None: walk_expr(s.expr)
             elif isinstance(s, ExprStmt):
                 walk_expr(s.expr)
+            elif isinstance(s, For):
+                if s.init is not None: walk_stmt(s.init)
+                if s.cond is not None: walk_expr(s.cond)
+                if s.post is not None: walk_stmt(s.post)
+                for x in s.body: walk_stmt(x)
+            elif isinstance(s, StructDef):
+                pass
 
         for s in body:
             walk_stmt(s)
@@ -1007,11 +1296,20 @@ class CodeGen:
     EXTERN_TYPE_MAP = {"i64": "i64", "f64": "double", "void": "void"}
 
     def compile_program(self, stmts):
+        structdefs = [s for s in stmts if isinstance(s, StructDef)]
         funcdefs = [s for s in stmts if isinstance(s, FuncDef)]
         externs = [s for s in stmts if isinstance(s, ExternDecl)]
         imports = [s for s in stmts if isinstance(s, ImportDecl)]
         if not any(f.name == "main" for f in funcdefs):
             raise CompileError("Programa precisa de uma função main()")
+
+        for sd in structdefs:
+            if sd.name in self.structs:
+                raise CompileError(f"Struct '{sd.name}' já foi declarada")
+            self.structs[sd.name] = sd.fields
+        for sd in structdefs:
+            for _, field_t in sd.fields:
+                self._validate_type_spec(field_t)
 
         self.imports = [i.name for i in imports]
 
@@ -1021,6 +1319,8 @@ class CodeGen:
                 raise CompileError(f"'{e.name}' já foi declarada (extern duplicado ou conflito com fn)")
             param_ts = [self.EXTERN_TYPE_MAP[t] for t in e.param_types]
             ret_t = self.EXTERN_TYPE_MAP[e.ret_type]
+            for t in param_ts + [ret_t]:
+                self._validate_type_spec(t)
             self.functions[e.name] = {"params": param_ts, "ret": ret_t, "extern": True}
             llvm_ret = "void" if ret_t == "void" else ret_t
             extern_ir.append(f"declare {llvm_ret} @{e.name}({', '.join(param_ts)})")
@@ -1061,6 +1361,9 @@ class CodeGen:
             # explícita ('-> tipo') se houver; senão cai na heurística antiga
             # (varre os returns do corpo tentando adivinhar).
             ret_kind = f.ret_type if f.ret_type is not None else self._scan_return_type(f.body)
+            self._validate_type_spec(ret_kind)
+            for t in f.param_types:
+                self._validate_type_spec(t)
             self.functions[f.name] = {
                 "params": f.param_types, "ret": ret_kind, "extern": False,
             }
@@ -1087,10 +1390,10 @@ class CodeGen:
             if isinstance(s, VarDecl):
                 t = s.decl_type if s.decl_type is not None else self._guess_type(s.expr, out)
                 if s.name in out:
-                    if (out[s.name] == "str") != (t == "str"):
+                    if not self._type_compatible(out[s.name], t):
                         raise CompileError(
                             f"'{s.name}' já foi declarada com outro tipo nesta função — "
-                            "não dá pra redeclarar com um tipo incompatível (str vs número)"
+                            f"não dá pra redeclarar com um tipo incompatível ({self.type_name(out[s.name])} vs {self.type_name(t)})"
                         )
                 else:
                     out[s.name] = t
@@ -1099,6 +1402,12 @@ class CodeGen:
                 self._collect_locals(s.else_b, out)
             elif isinstance(s, While):
                 self._collect_locals(s.body, out)
+            elif isinstance(s, For):
+                if s.init is not None:
+                    self._collect_locals([s.init], out)
+                self._collect_locals(s.body, out)
+                if s.post is not None:
+                    self._collect_locals([s.post], out)
             elif isinstance(s, TryCatch):
                 self._collect_locals(s.try_body, out)
                 if s.catch_var in out and out[s.catch_var] != "str":
@@ -1108,6 +1417,8 @@ class CodeGen:
                     )
                 out.setdefault(s.catch_var, "str")
                 self._collect_locals(s.catch_body, out)
+            elif isinstance(s, StructDef):
+                continue
 
     def gen_function(self, node):
         env = {}
@@ -1224,6 +1535,8 @@ class CodeGen:
             lines.append(f"  %cast_{uid} = uitofp i1 {value_reg} to double")
         elif value_type == "i64" and target_type == "i1":
             lines.append(f"  %cast_{uid} = icmp ne i64 {value_reg}, 0")
+        elif value_type == "double" and target_type == "i1":
+            lines.append(f"  %cast_{uid} = fcmp une double {value_reg}, 0.0")
         else:
             return value_reg  # tipos iguais ou combinação não esperada
         return f"%cast_{uid}"
@@ -1253,13 +1566,14 @@ class CodeGen:
             # fixado e guarda o valor. Isso garante que o registrador sempre
             # "domine" qualquer uso, mesmo quando a declaração está dentro
             # de um if/while/try condicional.
-            target_t = env.get(node.name, t)
-            if (target_t == "str") != (t == "str"):
+            target_t = node.decl_type if node.decl_type is not None else env.get(node.name, t)
+            if not self._type_compatible(target_t, t):
                 raise CompileError(
-                    f"'{node.name}' já foi declarada como {target_t} nesta função — "
-                    "não dá pra redeclarar com um tipo incompatível (str vs número)"
+                    f"'{node.name}' já foi declarada como {self.type_name(target_t)} nesta função — "
+                    f"não dá pra redeclarar com um tipo incompatível ({self.type_name(target_t)} vs {self.type_name(t)})"
                 )
-            v = self.cast(lines, t, v, target_t)
+            if not is_opaque_type(target_t) and target_t != "str":
+                v = self.cast(lines, t, v, target_t)
             lt = self.llvm_type(target_t)
             env[node.name] = target_t
             lines.append(f"  store {lt} {v}, {lt}* %{node.name}, align 8")
@@ -1269,26 +1583,41 @@ class CodeGen:
                 raise CompileError(f"Variável '{node.name}' não declarada — use 'var {node.name} = ...' primeiro")
             target_t = env[node.name]
             t, v = self.gen_expr(node.expr, env, lines)
-            if (target_t == "str") != (t == "str"):
+            if not self._type_compatible(target_t, t):
                 raise CompileError(
-                    f"Tipo incompatível ao atribuir a '{node.name}' (era {target_t}, veio {t}) — "
-                    "strings e números não se misturam automaticamente"
+                    f"Tipo incompatível ao atribuir a '{node.name}' (era {self.type_name(target_t)}, veio {self.type_name(t)})"
                 )
-            v = self.cast(lines, t, v, target_t)
+            if not is_opaque_type(target_t) and target_t != "str":
+                v = self.cast(lines, t, v, target_t)
             lt = self.llvm_type(target_t)
             lines.append(f"  store {lt} {v}, {lt}* %{node.name}, align 8")
 
         elif isinstance(node, IndexSet):
+            at, av = self.gen_expr(node.arr, env, lines)
             _, iv = self.gen_expr(node.idx, env, lines)
             t, v = self.gen_expr(node.expr, env, lines)
-            v = self.cast(lines, t, v, "i64")
-            at, av = self.gen_expr(node.arr, env, lines)
-            if at != "i64":
-                raise CompileError("Indexação (escrita com []) só é suportada em arrays")
             uid = self.new_id()
-            lines.append(f"  %ap_{uid} = inttoptr i64 {av} to i64*")
-            lines.append(f"  %ep_{uid} = getelementptr i64, i64* %ap_{uid}, i64 {iv}")
-            lines.append(f"  store i64 {v}, i64* %ep_{uid}, align 8")
+            if at == "i64":
+                v = self.cast(lines, t, v, "i64")
+                lines.append(f"  %ap_{uid} = inttoptr i64 {av} to i64*")
+                lines.append(f"  %ep_{uid} = getelementptr i64, i64* %ap_{uid}, i64 {iv}")
+                lines.append(f"  store i64 {v}, i64* %ep_{uid}, align 8")
+            elif is_array_type(at) and at[1] == "double" and at[2] == 1:
+                v = self.cast(lines, t, v, "double")
+                lines.append(f"  %ad_{uid} = getelementptr i8, i8* {av}, i64 8")
+                lines.append(f"  %adp_{uid} = bitcast i8* %ad_{uid} to double*")
+                lines.append(f"  %ep_{uid} = getelementptr double, double* %adp_{uid}, i64 {iv}")
+                lines.append(f"  store double {v}, double* %ep_{uid}, align 8")
+            elif is_array_type(at) and at[1] == "double" and at[2] == 2:
+                if not (is_array_type(t) and t[1] == "double" and t[2] == 1):
+                    raise CompileError("Atribuição em linha de matriz espera um valor do tipo double[]")
+                lines.append(f"  %rowbyte_{uid} = mul nsw i64 {iv}, 8")
+                lines.append(f"  %rowoff_{uid} = add nsw i64 16, %rowbyte_{uid}")
+                lines.append(f"  %rowp_{uid} = getelementptr i8, i8* {av}, i64 %rowoff_{uid}")
+                lines.append(f"  %rowpp_{uid} = bitcast i8* %rowp_{uid} to i8**")
+                lines.append(f"  store i8* {v}, i8** %rowpp_{uid}, align 8")
+            else:
+                raise CompileError(f"Indexação (escrita com []) não é suportada para o tipo '{self.type_name(at)}'")
 
         elif isinstance(node, Print):
             if isinstance(node.expr, Str):
@@ -1311,6 +1640,11 @@ class CodeGen:
                 elif t == "str":
                     lines.append(f"  %pf_{uid} = getelementptr [4 x i8], [4 x i8]* @fmt_str, i32 0, i32 0")
                     lines.append(f"  call i32 (i8*, ...) @printf(i8* %pf_{uid}, i8* {v})")
+                elif is_opaque_type(t):
+                    raise CompileError(
+                        f"print ainda não suporta diretamente valores de tipo '{self.type_name(t)}' — "
+                        "use um helper específico da biblioteca ou extraia campos/elementos"
+                    )
                 else:
                     # normaliza pra i64 antes de imprimir — "t" pode vir como
                     # i1 (resultado cru de uma comparação, ex. print(a > b))
@@ -1324,6 +1658,7 @@ class CodeGen:
         elif isinstance(node, If):
             uid = self.new_id()
             cond_t, cond_v = self.gen_expr(node.cond, env, lines)
+            cond_v = self._to_bool(lines, cond_t, cond_v)
             lines.append(f"  br i1 {cond_v}, label %it_{uid}, label %ie_{uid}")
             lines.append(f"it_{uid}:")
             for s in node.then_b: self.gen_stmt(s, env, lines, func_ret_type)
@@ -1336,16 +1671,46 @@ class CodeGen:
         elif isinstance(node, While):
             uid = self.new_id()
             exit_label = f"be_{uid}"
-            self.loop_stack.append(exit_label)
+            cond_label = f"c_{uid}"
+            self.loop_stack.append((cond_label, exit_label))
             lines.append(f"  br label %c_{uid}")
             lines.append(f"c_{uid}:")
             cond_t, cond_v = self.gen_expr(node.cond, env, lines)
+            cond_v = self._to_bool(lines, cond_t, cond_v)
             lines.append(f"  br i1 {cond_v}, label %bt_{uid}, label %{exit_label}")
             lines.append(f"bt_{uid}:")
             for s in node.body: self.gen_stmt(s, env, lines, func_ret_type)
             lines.append(f"  br label %c_{uid}")
             self.loop_stack.pop()
             lines.append(f"{exit_label}:")
+
+        elif isinstance(node, For):
+            uid = self.new_id()
+            cond_label = f"for_cond_{uid}"
+            body_label = f"for_body_{uid}"
+            post_label = f"for_post_{uid}"
+            end_label = f"for_end_{uid}"
+            self.loop_stack.append((post_label, end_label))
+            if node.init is not None:
+                self.gen_stmt(node.init, env, lines, func_ret_type)
+            lines.append(f"  br label %{cond_label}")
+            lines.append(f"{cond_label}:")
+            if node.cond is not None:
+                cond_t, cond_v = self.gen_expr(node.cond, env, lines)
+                cond_v = self._to_bool(lines, cond_t, cond_v)
+            else:
+                cond_v = "1"
+            lines.append(f"  br i1 {cond_v}, label %{body_label}, label %{end_label}")
+            lines.append(f"{body_label}:")
+            for s in node.body:
+                self.gen_stmt(s, env, lines, func_ret_type)
+            lines.append(f"  br label %{post_label}")
+            lines.append(f"{post_label}:")
+            if node.post is not None:
+                self.gen_stmt(node.post, env, lines, func_ret_type)
+            lines.append(f"  br label %{cond_label}")
+            self.loop_stack.pop()
+            lines.append(f"{end_label}:")
 
         elif isinstance(node, TryCatch):
             uid = self.new_id()
@@ -1369,13 +1734,45 @@ class CodeGen:
             lines.append(f"  br label %{end_label}")
             lines.append(f"{end_label}:")
 
+        elif isinstance(node, FieldSet):
+            base_t, base_v = self.gen_expr(node.base, env, lines)
+            if not is_struct_type(base_t):
+                raise CompileError(f"Campo '{node.field}' só pode ser atribuído em struct")
+            struct_name = base_t[1]
+            field_idx = self._struct_field_index(struct_name, node.field)
+            field_t = self._struct_field_type(struct_name, node.field)
+            t, v = self.gen_expr(node.expr, env, lines)
+            if not self._type_compatible(field_t, t):
+                raise CompileError(
+                    f"Campo '{node.field}' da struct '{struct_name}' espera '{self.type_name(field_t)}', recebeu '{self.type_name(t)}'"
+                )
+            v = self.cast(lines, t, v, field_t)
+            slot_uid = self.new_id()
+            field_off = field_idx * 8
+            lines.append(f"  %fldp_{slot_uid} = getelementptr i8, i8* {base_v}, i64 {field_off}")
+            if is_opaque_type(field_t) or field_t == "str":
+                lines.append(f"  %fldpp_{slot_uid} = bitcast i8* %fldp_{slot_uid} to i8**")
+                lines.append(f"  store i8* {v}, i8** %fldpp_{slot_uid}, align 8")
+            else:
+                llvm_ft = self.llvm_type(field_t)
+                lines.append(f"  %fldtp_{slot_uid} = bitcast i8* %fldp_{slot_uid} to {llvm_ft}*")
+                lines.append(f"  store {llvm_ft} {v}, {llvm_ft}* %fldtp_{slot_uid}, align 8")
+
         elif isinstance(node, Break):
             if not self.loop_stack:
                 raise CompileError("Instrução 'break' fora de um loop")
-            target = self.loop_stack[-1]
+            _, target = self.loop_stack[-1]
             lines.append(f"  br label %{target}")
             uid = self.new_id()
             lines.append(f"unreachable_brk_{uid}:")
+
+        elif isinstance(node, Continue):
+            if not self.loop_stack:
+                raise CompileError("Instrução 'continue' fora de um loop")
+            target, _ = self.loop_stack[-1]
+            lines.append(f"  br label %{target}")
+            uid = self.new_id()
+            lines.append(f"unreachable_cont_{uid}:")
 
         elif isinstance(node, Throw):
             t, v = self.gen_expr(node.expr, env, lines)
@@ -1398,15 +1795,15 @@ class CodeGen:
             else:
                 t, v = self.gen_expr(node.expr, env, lines)
                 if func_ret_type == "i8*":
-                    if t != "str":
+                    if not (t == "str" or is_opaque_type(t)):
                         raise CompileError(
-                            "Função declarada retornando 'str' (ou inferida assim), "
-                            f"mas o valor retornado é do tipo '{t}'"
+                            "Função declarada retornando tipo composto/str, "
+                            f"mas o valor retornado é do tipo '{self.type_name(t)}'"
                         )
-                elif t == "str":
+                elif t == "str" or is_opaque_type(t):
                     raise CompileError(
-                        "Não é possível retornar uma string de uma função que não "
-                        "declara retorno 'str' — anota a função com '-> str'"
+                        "Não é possível retornar um tipo composto/string de uma função "
+                        "que não declara esse retorno explicitamente"
                     )
                 else:
                     v = self.cast(lines, t, v, func_ret_type)
@@ -1416,6 +1813,8 @@ class CodeGen:
 
         elif isinstance(node, ExprStmt):
             self.gen_expr(node.expr, env, lines)
+        elif isinstance(node, StructDef):
+            return
 
         else:
             raise CompileError(f"Statement não suportado: {node}")
@@ -1461,6 +1860,25 @@ class CodeGen:
                 lines.append(f"  %fnp_{uid} = ptrtoint {fnty}* @{node.name} to i64")
                 return "i64", f"%fnp_{uid}"
             raise CompileError(f"Variável '{node.name}' usada antes de declarar")
+
+        if isinstance(node, FieldGet):
+            base_t, base_v = self.gen_expr(node.base, env, lines)
+            if not is_struct_type(base_t):
+                raise CompileError(f"Acesso a campo '{node.field}' exige um struct, veio '{self.type_name(base_t)}'")
+            struct_name = base_t[1]
+            field_idx = self._struct_field_index(struct_name, node.field)
+            field_t = self._struct_field_type(struct_name, node.field)
+            field_off = field_idx * 8
+            slot_uid = self.new_id()
+            lines.append(f"  %fldp_{slot_uid} = getelementptr i8, i8* {base_v}, i64 {field_off}")
+            if is_opaque_type(field_t) or field_t == "str":
+                lines.append(f"  %fldpp_{slot_uid} = bitcast i8* %fldp_{slot_uid} to i8**")
+                lines.append(f"  %fldv_{slot_uid} = load i8*, i8** %fldpp_{slot_uid}, align 8")
+                return field_t, f"%fldv_{slot_uid}"
+            llvm_ft = self.llvm_type(field_t)
+            lines.append(f"  %fldpp_{slot_uid} = bitcast i8* %fldp_{slot_uid} to {llvm_ft}*")
+            lines.append(f"  %fldv_{slot_uid} = load {llvm_ft}, {llvm_ft}* %fldpp_{slot_uid}, align 8")
+            return field_t, f"%fldv_{slot_uid}"
 
         if isinstance(node, UnaryOp):
             t, v = self.gen_expr(node.operand, env, lines)
@@ -1577,16 +1995,68 @@ class CodeGen:
 
         if isinstance(node, IndexGet):
             at, av = self.gen_expr(node.arr, env, lines)
-            if at != "i64":
-                raise CompileError("Indexação com [] só é suportada em arrays")
             _, iv = self.gen_expr(node.idx, env, lines)
-            lines.append(f"  %ap_{uid} = inttoptr i64 {av} to i64*")
-            lines.append(f"  %ep_{uid} = getelementptr i64, i64* %ap_{uid}, i64 {iv}")
-            lines.append(f"  %ev_{uid} = load i64, i64* %ep_{uid}, align 8")
-            return "i64", f"%ev_{uid}"
+            if at == "i64":
+                lines.append(f"  %ap_{uid} = inttoptr i64 {av} to i64*")
+                lines.append(f"  %ep_{uid} = getelementptr i64, i64* %ap_{uid}, i64 {iv}")
+                lines.append(f"  %ev_{uid} = load i64, i64* %ep_{uid}, align 8")
+                return "i64", f"%ev_{uid}"
+            if is_array_type(at):
+                if at[1] == "double" and at[2] == 1:
+                    lines.append(f"  %ad_{uid} = getelementptr i8, i8* {av}, i64 8")
+                    lines.append(f"  %adp_{uid} = bitcast i8* %ad_{uid} to double*")
+                    lines.append(f"  %ep_{uid} = getelementptr double, double* %adp_{uid}, i64 {iv}")
+                    lines.append(f"  %ev_{uid} = load double, double* %ep_{uid}, align 8")
+                    return "double", f"%ev_{uid}"
+                if at[1] == "double" and at[2] == 2:
+                    row_off = self.new_id()
+                    lines.append(f"  %rowbyte_{row_off} = mul nsw i64 {iv}, 8")
+                    lines.append(f"  %rowoff_{row_off} = add nsw i64 16, %rowbyte_{row_off}")
+                    lines.append(f"  %rowp_{row_off} = getelementptr i8, i8* {av}, i64 %rowoff_{row_off}")
+                    lines.append(f"  %rowpp_{row_off} = bitcast i8* %rowp_{row_off} to i8**")
+                    lines.append(f"  %rowv_{row_off} = load i8*, i8** %rowpp_{row_off}, align 8")
+                    return ("array", "double", 1), f"%rowv_{row_off}"
+            raise CompileError(f"Indexação com [] não é suportada para o tipo '{self.type_name(at)}'")
 
         if isinstance(node, Call):
             return self.gen_call(node, env, lines, uid)
+
+        if isinstance(node, StructLiteral):
+            if node.name not in self.structs:
+                raise CompileError(f"Struct '{node.name}' não foi declarada")
+            fields = self.structs[node.name]
+            field_map = {k: v for k, v in node.fields}
+            missing = [name for name, _ in fields if name not in field_map]
+            extra = [name for name in field_map if name not in dict(fields)]
+            if missing:
+                raise CompileError(
+                    f"Literal da struct '{node.name}' está incompleto, faltam campos: {', '.join(missing)}"
+                )
+            if extra:
+                raise CompileError(
+                    f"Literal da struct '{node.name}' tem campos desconhecidos: {', '.join(extra)}"
+                )
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            size_bytes = len(fields) * 8
+            lines.append(f"  %slit_{uid} = call i8* {alloc_fn}(i64 {size_bytes})")
+            for idx, (fname, ft) in enumerate(fields):
+                et, ev = self.gen_expr(field_map[fname], env, lines)
+                if not self._type_compatible(ft, et):
+                    raise CompileError(
+                        f"Campo '{fname}' da struct '{node.name}' espera '{self.type_name(ft)}', recebeu '{self.type_name(et)}'"
+                    )
+                ev = self.cast(lines, et, ev, ft)
+                slot_uid = self.new_id()
+                off = idx * 8
+                lines.append(f"  %slotp_{slot_uid} = getelementptr i8, i8* %slit_{uid}, i64 {off}")
+                if is_opaque_type(ft) or ft == "str":
+                    lines.append(f"  %slotpp_{slot_uid} = bitcast i8* %slotp_{slot_uid} to i8**")
+                    lines.append(f"  store i8* {ev}, i8** %slotpp_{slot_uid}, align 8")
+                else:
+                    lft = self.llvm_type(ft)
+                    lines.append(f"  %slottp_{slot_uid} = bitcast i8* %slotp_{slot_uid} to {lft}*")
+                    lines.append(f"  store {lft} {ev}, {lft}* %slottp_{slot_uid}, align 8")
+            return ("struct", node.name), f"%slit_{uid}"
 
         raise CompileError(f"Expressão não suportada: {node}")
 
@@ -1663,24 +2133,275 @@ class CodeGen:
         if name == "random":
             t, mv = self.gen_expr(node.args[0], env, lines)
             mv = self.cast(lines, t, mv, "i64")
-            lines.append(f"  %ri_{uid} = call i32 @rand()")
-            lines.append(f"  %r6_{uid} = sext i32 %ri_{uid} to i64")
-            lines.append(f"  %rc_{uid} = sdiv i64 %r6_{uid}, 256")
-            lines.append(f"  %rr_{uid} = srem i64 %rc_{uid}, {mv}")
+            lines.append(f"  %rb_{uid} = alloca i64, align 8")
+            lines.append(f"  %rpb_{uid} = bitcast i64* %rb_{uid} to i8*")
+            lines.append(f"  %rgr_{uid} = call i64 @getrandom(i8* %rpb_{uid}, i64 8, i32 0)")
+            lines.append(f"  %rgok_{uid} = icmp eq i64 %rgr_{uid}, 8")
+            lines.append(f"  %rv_{uid} = load i64, i64* %rb_{uid}, align 8")
+            lines.append(f"  %rvnz_{uid} = icmp ne i64 %rv_{uid}, 0")
+            lines.append(f"  %rraw_{uid} = select i1 %rvnz_{uid}, i64 %rv_{uid}, i64 1")
+            lines.append(f"  %rabs_{uid} = and i64 %rraw_{uid}, 9223372036854775807")
+            lines.append(f"  %rr_{uid} = urem i64 %rabs_{uid}, {mv}")
             return "i64", f"%rr_{uid}"
 
         # --- Strings avançadas ---
 
         if name == "len":
             t, sv = self.gen_expr(node.args[0], env, lines)
-            if t != "str":
-                raise CompileError("'len' espera uma string (pra tamanho de array, guarda o tamanho numa variável à parte)")
-            lines.append(f"  %ln_{uid} = call i64 @strlen(i8* {sv})")
-            return "i64", f"%ln_{uid}"
+            if t == "str":
+                lines.append(f"  %ln_{uid} = call i64 @strlen(i8* {sv})")
+                return "i64", f"%ln_{uid}"
+            if is_array_type(t):
+                lines.append(f"  %lni_{uid} = bitcast i8* {sv} to i64*")
+                lines.append(f"  %ln_{uid} = load i64, i64* %lni_{uid}, align 8")
+                return "i64", f"%ln_{uid}"
+            raise CompileError("'len' espera string ou array nativo")
 
         if name == "str":
             t, v = self.gen_expr(node.args[0], env, lines)
             return "str", self.to_str(lines, t, v)
+
+        if name == "darray":
+            if len(node.args) != 1:
+                raise CompileError("'darray' espera 1 argumento: darray(tamanho)")
+            t, n = self.gen_expr(node.args[0], env, lines)
+            n = self.cast(lines, t, n, "i64")
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            total_uid = self.new_id()
+            lines.append(f"  %darr_bytes_{total_uid} = add nsw i64 1, {n}")
+            lines.append(f"  %darr_bytes2_{total_uid} = mul nsw i64 %darr_bytes_{total_uid}, 8")
+            lines.append(f"  %darr_mem_{total_uid} = call i8* {alloc_fn}(i64 %darr_bytes2_{total_uid})")
+            lines.append(f"  %darr_i64p_{total_uid} = bitcast i8* %darr_mem_{total_uid} to i64*")
+            lines.append(f"  store i64 {n}, i64* %darr_i64p_{total_uid}, align 8")
+            lines.append(f"  %darr_dat_{total_uid} = getelementptr i8, i8* %darr_mem_{total_uid}, i64 8")
+            lines.append(f"  %darr_dptr_{total_uid} = bitcast i8* %darr_dat_{total_uid} to double*")
+            lines.append(f"  %darr_idx_{total_uid} = alloca i64, align 8")
+            lines.append(f"  store i64 0, i64* %darr_idx_{total_uid}, align 8")
+            lines.append(f"  br label %darr_fill_{total_uid}")
+            lines.append(f"darr_fill_{total_uid}:")
+            lines.append(f"  %darr_i_{total_uid} = load i64, i64* %darr_idx_{total_uid}, align 8")
+            lines.append(f"  %darr_cmp_{total_uid} = icmp slt i64 %darr_i_{total_uid}, {n}")
+            lines.append(f"  br i1 %darr_cmp_{total_uid}, label %darr_body_{total_uid}, label %darr_end_{total_uid}")
+            lines.append(f"darr_body_{total_uid}:")
+            lines.append(f"  %darr_ep_{total_uid} = getelementptr double, double* %darr_dptr_{total_uid}, i64 %darr_i_{total_uid}")
+            lines.append(f"  store double 0.0, double* %darr_ep_{total_uid}, align 8")
+            lines.append(f"  %darr_i2_{total_uid} = add nsw i64 %darr_i_{total_uid}, 1")
+            lines.append(f"  store i64 %darr_i2_{total_uid}, i64* %darr_idx_{total_uid}, align 8")
+            lines.append(f"  br label %darr_fill_{total_uid}")
+            lines.append(f"darr_end_{total_uid}:")
+            return ("array", "double", 1), f"%darr_mem_{total_uid}"
+
+        if name == "dmat":
+            if len(node.args) != 2:
+                raise CompileError("'dmat' espera 2 argumentos: dmat(linhas, colunas)")
+            tr, rv = self.gen_expr(node.args[0], env, lines)
+            tc, cv = self.gen_expr(node.args[1], env, lines)
+            rv = self.cast(lines, tr, rv, "i64")
+            cv = self.cast(lines, tc, cv, "i64")
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            uidm = self.new_id()
+            lines.append(f"  %dmat_rows_{uidm} = add nsw i64 {rv}, 0")
+            lines.append(f"  %dmat_cols_{uidm} = add nsw i64 {cv}, 0")
+            lines.append(f"  %dmat_slots_{uidm} = add nsw i64 2, {rv}")
+            lines.append(f"  %dmat_bytes_{uidm} = mul nsw i64 %dmat_slots_{uidm}, 8")
+            lines.append(f"  %dmat_mem_{uidm} = call i8* {alloc_fn}(i64 %dmat_bytes_{uidm})")
+            lines.append(f"  %dmat_i64p_{uidm} = bitcast i8* %dmat_mem_{uidm} to i64*")
+            lines.append(f"  store i64 {rv}, i64* %dmat_i64p_{uidm}, align 8")
+            lines.append(f"  %dmat_colslot_{uidm} = getelementptr i64, i64* %dmat_i64p_{uidm}, i64 1")
+            lines.append(f"  store i64 {cv}, i64* %dmat_colslot_{uidm}, align 8")
+            lines.append(f"  %dmat_idx_{uidm} = alloca i64, align 8")
+            lines.append(f"  store i64 0, i64* %dmat_idx_{uidm}, align 8")
+            lines.append(f"  br label %dmat_fill_{uidm}")
+            lines.append(f"dmat_fill_{uidm}:")
+            lines.append(f"  %dmat_i_{uidm} = load i64, i64* %dmat_idx_{uidm}, align 8")
+            lines.append(f"  %dmat_cmp_{uidm} = icmp slt i64 %dmat_i_{uidm}, {rv}")
+            lines.append(f"  br i1 %dmat_cmp_{uidm}, label %dmat_body_{uidm}, label %dmat_end_{uidm}")
+            lines.append(f"dmat_body_{uidm}:")
+            lines.append(f"  %rowptrslot_{uidm} = getelementptr i8, i8* %dmat_mem_{uidm}, i64 16")
+            lines.append(f"  %rowbyte_{uidm} = mul nsw i64 %dmat_i_{uidm}, 8")
+            lines.append(f"  %rowptrslot2_{uidm} = getelementptr i8, i8* %rowptrslot_{uidm}, i64 %rowbyte_{uidm}")
+            lines.append(f"  %rowptrslot3_{uidm} = bitcast i8* %rowptrslot2_{uidm} to i8**")
+            # row allocation
+            rowalloc_uid = self.new_id()
+            lines.append(f"  %drow_bytes_{rowalloc_uid} = add nsw i64 1, %dmat_cols_{uidm}")
+            lines.append(f"  %drow_bytes2_{rowalloc_uid} = mul nsw i64 %drow_bytes_{rowalloc_uid}, 8")
+            lines.append(f"  %drow_mem_{rowalloc_uid} = call i8* {alloc_fn}(i64 %drow_bytes2_{rowalloc_uid})")
+            lines.append(f"  %drow_i64p_{rowalloc_uid} = bitcast i8* %drow_mem_{rowalloc_uid} to i64*")
+            lines.append(f"  store i64 %dmat_cols_{uidm}, i64* %drow_i64p_{rowalloc_uid}, align 8")
+            lines.append(f"  %drow_dat_{rowalloc_uid} = getelementptr i8, i8* %drow_mem_{rowalloc_uid}, i64 8")
+            lines.append(f"  %drow_dptr_{rowalloc_uid} = bitcast i8* %drow_dat_{rowalloc_uid} to double*")
+            lines.append(f"  %drow_idx_{rowalloc_uid} = alloca i64, align 8")
+            lines.append(f"  store i64 0, i64* %drow_idx_{rowalloc_uid}, align 8")
+            lines.append(f"  br label %drow_fill_{rowalloc_uid}")
+            lines.append(f"drow_fill_{rowalloc_uid}:")
+            lines.append(f"  %drow_i_{rowalloc_uid} = load i64, i64* %drow_idx_{rowalloc_uid}, align 8")
+            lines.append(f"  %drow_cmp_{rowalloc_uid} = icmp slt i64 %drow_i_{rowalloc_uid}, %dmat_cols_{uidm}")
+            lines.append(f"  br i1 %drow_cmp_{rowalloc_uid}, label %drow_body_{rowalloc_uid}, label %drow_end_{rowalloc_uid}")
+            lines.append(f"drow_body_{rowalloc_uid}:")
+            lines.append(f"  %drow_ep_{rowalloc_uid} = getelementptr double, double* %drow_dptr_{rowalloc_uid}, i64 %drow_i_{rowalloc_uid}")
+            lines.append(f"  store double 0.0, double* %drow_ep_{rowalloc_uid}, align 8")
+            lines.append(f"  %drow_i2_{rowalloc_uid} = add nsw i64 %drow_i_{rowalloc_uid}, 1")
+            lines.append(f"  store i64 %drow_i2_{rowalloc_uid}, i64* %drow_idx_{rowalloc_uid}, align 8")
+            lines.append(f"  br label %drow_fill_{rowalloc_uid}")
+            lines.append(f"drow_end_{rowalloc_uid}:")
+            lines.append(f"  store i8* %drow_mem_{rowalloc_uid}, i8** %rowptrslot3_{uidm}, align 8")
+            lines.append(f"  %dmat_i2_{uidm} = add nsw i64 %dmat_i_{uidm}, 1")
+            lines.append(f"  store i64 %dmat_i2_{uidm}, i64* %dmat_idx_{uidm}, align 8")
+            lines.append(f"  br label %dmat_fill_{uidm}")
+            lines.append(f"dmat_end_{uidm}:")
+            return ("array", "double", 2), f"%dmat_mem_{uidm}"
+
+        if name == "matmul":
+            if len(node.args) != 2:
+                raise CompileError("'matmul' espera 2 argumentos: matmul(a, b)")
+            ta, av = self.gen_expr(node.args[0], env, lines)
+            tb, bv = self.gen_expr(node.args[1], env, lines)
+            if not (is_array_type(ta) and is_array_type(tb) and ta == ("array", "double", 2) and tb == ("array", "double", 2)):
+                raise CompileError("matmul nativo espera matrizes double[][]")
+
+            # Layout:
+            #   [0] rows
+            #   [1] cols
+            #   [2..] row pointers (i8*)
+            a_hdr_uid = self.new_id()
+            b_hdr_uid = self.new_id()
+            lines.append(f"  %a_i64p_{a_hdr_uid} = bitcast i8* {av} to i64*")
+            lines.append(f"  %a_rows_{a_hdr_uid} = load i64, i64* %a_i64p_{a_hdr_uid}, align 8")
+            lines.append(f"  %a_cols_p_{a_hdr_uid} = getelementptr i64, i64* %a_i64p_{a_hdr_uid}, i64 1")
+            lines.append(f"  %a_cols_{a_hdr_uid} = load i64, i64* %a_cols_p_{a_hdr_uid}, align 8")
+            lines.append(f"  %b_i64p_{b_hdr_uid} = bitcast i8* {bv} to i64*")
+            lines.append(f"  %b_rows_{b_hdr_uid} = load i64, i64* %b_i64p_{b_hdr_uid}, align 8")
+            lines.append(f"  %b_cols_p_{b_hdr_uid} = getelementptr i64, i64* %b_i64p_{b_hdr_uid}, i64 1")
+            lines.append(f"  %b_cols_{b_hdr_uid} = load i64, i64* %b_cols_p_{b_hdr_uid}, align 8")
+            lines.append(f"  %mm_dims_ok_{uid} = icmp eq i64 %a_cols_{a_hdr_uid}, %b_rows_{b_hdr_uid}")
+            lines.append(f"  br i1 %mm_dims_ok_{uid}, label %mm_ok_{uid}, label %mm_bad_{uid}")
+            lines.append(f"mm_bad_{uid}:")
+            err_text = "matmul: dimensoes incompativeis"
+            err_uid = self.new_id()
+            err_escaped = llvm_escape_string(err_text)
+            err_byte_len = len(err_text.encode("utf-8")) + 1
+            self.strings.append(
+                f'@.str.{err_uid} = private unnamed_addr constant [{err_byte_len} x i8] c"{err_escaped}\\00"'
+            )
+            lines.append(f"  %mm_errp_{uid} = getelementptr [{err_byte_len} x i8], [{err_byte_len} x i8]* @.str.{err_uid}, i32 0, i32 0")
+            lines.append(f"  store i8* %mm_errp_{uid}, i8** @__ares_exc_msg")
+            lines.append("  store i32 1, i32* @__ares_exc_flag")
+            target = self.catch_stack[-1] if self.catch_stack else self.func_exc_exit
+            lines.append(f"  br label %{target}")
+            lines.append(f"mm_ok_{uid}:")
+
+            alloc_fn = "@GC_malloc" if self.use_gc else "@malloc"
+            out_uid = self.new_id()
+            lines.append(f"  %mm_out_slots_{out_uid} = add nsw i64 2, %a_rows_{a_hdr_uid}")
+            lines.append(f"  %mm_out_bytes_{out_uid} = mul nsw i64 %mm_out_slots_{out_uid}, 8")
+            lines.append(f"  %mm_out_mem_{out_uid} = call i8* {alloc_fn}(i64 %mm_out_bytes_{out_uid})")
+            lines.append(f"  %mm_out_i64p_{out_uid} = bitcast i8* %mm_out_mem_{out_uid} to i64*")
+            lines.append(f"  store i64 %a_rows_{a_hdr_uid}, i64* %mm_out_i64p_{out_uid}, align 8")
+            lines.append(f"  %mm_out_cols_p_{out_uid} = getelementptr i64, i64* %mm_out_i64p_{out_uid}, i64 1")
+            lines.append(f"  store i64 %b_cols_{b_hdr_uid}, i64* %mm_out_cols_p_{out_uid}, align 8")
+
+            rows_base_uid = self.new_id()
+            b_rows_base_uid = self.new_id()
+            out_rows_base_uid = self.new_id()
+            lines.append(f"  %mm_a_rows_base_{rows_base_uid} = getelementptr i8, i8* {av}, i64 16")
+            lines.append(f"  %mm_b_rows_base_{b_rows_base_uid} = getelementptr i8, i8* {bv}, i64 16")
+            lines.append(f"  %mm_out_rows_base_{out_rows_base_uid} = getelementptr i8, i8* %mm_out_mem_{out_uid}, i64 16")
+
+            i_slot_uid = self.new_id()
+            lines.append(f"  %mm_i_{i_slot_uid} = alloca i64, align 8")
+            lines.append(f"  store i64 0, i64* %mm_i_{i_slot_uid}, align 8")
+            lines.append(f"  br label %mm_i_cond_{uid}")
+            lines.append(f"mm_i_cond_{uid}:")
+            lines.append(f"  %mm_i_v_{i_slot_uid} = load i64, i64* %mm_i_{i_slot_uid}, align 8")
+            lines.append(f"  %mm_i_cmp_{uid} = icmp slt i64 %mm_i_v_{i_slot_uid}, %a_rows_{a_hdr_uid}")
+            lines.append(f"  br i1 %mm_i_cmp_{uid}, label %mm_i_body_{uid}, label %mm_done_{uid}")
+
+            lines.append(f"mm_i_body_{uid}:")
+            row_alloc_uid = self.new_id()
+            lines.append(f"  %mm_row_slots_{row_alloc_uid} = add nsw i64 1, %b_cols_{b_hdr_uid}")
+            lines.append(f"  %mm_row_bytes_{row_alloc_uid} = mul nsw i64 %mm_row_slots_{row_alloc_uid}, 8")
+            lines.append(f"  %mm_row_mem_{row_alloc_uid} = call i8* {alloc_fn}(i64 %mm_row_bytes_{row_alloc_uid})")
+            lines.append(f"  %mm_row_i64p_{row_alloc_uid} = bitcast i8* %mm_row_mem_{row_alloc_uid} to i64*")
+            lines.append(f"  store i64 %b_cols_{b_hdr_uid}, i64* %mm_row_i64p_{row_alloc_uid}, align 8")
+            lines.append(f"  %mm_row_dat_{row_alloc_uid} = getelementptr i8, i8* %mm_row_mem_{row_alloc_uid}, i64 8")
+            lines.append(f"  %mm_row_dptr_{row_alloc_uid} = bitcast i8* %mm_row_dat_{row_alloc_uid} to double*")
+
+            a_row_byte_uid = self.new_id()
+            lines.append(f"  %mm_a_row_byte_{a_row_byte_uid} = mul nsw i64 %mm_i_v_{i_slot_uid}, 8")
+            lines.append(f"  %mm_a_row_slot_{a_row_byte_uid} = getelementptr i8, i8* %mm_a_rows_base_{rows_base_uid}, i64 %mm_a_row_byte_{a_row_byte_uid}")
+            lines.append(f"  %mm_a_row_slotp_{a_row_byte_uid} = bitcast i8* %mm_a_row_slot_{a_row_byte_uid} to i8**")
+            lines.append(f"  %mm_a_row_ptr_{a_row_byte_uid} = load i8*, i8** %mm_a_row_slotp_{a_row_byte_uid}, align 8")
+            lines.append(f"  %mm_a_row_data_{a_row_byte_uid} = getelementptr i8, i8* %mm_a_row_ptr_{a_row_byte_uid}, i64 8")
+            lines.append(f"  %mm_a_row_dptr_{a_row_byte_uid} = bitcast i8* %mm_a_row_data_{a_row_byte_uid} to double*")
+
+            lines.append(f"  %mm_row_byte_{row_alloc_uid} = mul nsw i64 %mm_i_v_{i_slot_uid}, 8")
+            lines.append(f"  %mm_row_slot_{row_alloc_uid} = getelementptr i8, i8* %mm_out_rows_base_{out_rows_base_uid}, i64 %mm_row_byte_{row_alloc_uid}")
+            lines.append(f"  %mm_row_slotp_{row_alloc_uid} = bitcast i8* %mm_row_slot_{row_alloc_uid} to i8**")
+            lines.append(f"  store i8* %mm_row_mem_{row_alloc_uid}, i8** %mm_row_slotp_{row_alloc_uid}, align 8")
+
+            j_slot_uid = self.new_id()
+            lines.append(f"  %mm_j_{j_slot_uid} = alloca i64, align 8")
+            lines.append(f"  store i64 0, i64* %mm_j_{j_slot_uid}, align 8")
+            lines.append(f"  br label %mm_j_cond_{uid}")
+            lines.append(f"mm_j_cond_{uid}:")
+            lines.append(f"  %mm_j_v_{j_slot_uid} = load i64, i64* %mm_j_{j_slot_uid}, align 8")
+            lines.append(f"  %mm_j_cmp_{uid} = icmp slt i64 %mm_j_v_{j_slot_uid}, %b_cols_{b_hdr_uid}")
+            lines.append(f"  br i1 %mm_j_cmp_{uid}, label %mm_j_body_{uid}, label %mm_j_end_{uid}")
+
+            lines.append(f"mm_j_body_{uid}:")
+            sum_slot_uid = self.new_id()
+            lines.append(f"  %mm_sum_{sum_slot_uid} = alloca double, align 8")
+            lines.append(f"  store double 0.0, double* %mm_sum_{sum_slot_uid}, align 8")
+
+            k_slot_uid = self.new_id()
+            lines.append(f"  %mm_k_{k_slot_uid} = alloca i64, align 8")
+            lines.append(f"  store i64 0, i64* %mm_k_{k_slot_uid}, align 8")
+            lines.append(f"  br label %mm_k_cond_{uid}")
+            lines.append(f"mm_k_cond_{uid}:")
+            lines.append(f"  %mm_k_v_{k_slot_uid} = load i64, i64* %mm_k_{k_slot_uid}, align 8")
+            lines.append(f"  %mm_k_cmp_{uid} = icmp slt i64 %mm_k_v_{k_slot_uid}, %a_cols_{a_hdr_uid}")
+            lines.append(f"  br i1 %mm_k_cmp_{uid}, label %mm_k_body_{uid}, label %mm_k_end_{uid}")
+
+            lines.append(f"mm_k_body_{uid}:")
+            b_row_uid = self.new_id()
+            lines.append(f"  %mm_b_row_byte_{b_row_uid} = mul nsw i64 %mm_k_v_{k_slot_uid}, 8")
+            lines.append(f"  %mm_b_row_slot_{b_row_uid} = getelementptr i8, i8* %mm_b_rows_base_{b_rows_base_uid}, i64 %mm_b_row_byte_{b_row_uid}")
+            lines.append(f"  %mm_b_row_slotp_{b_row_uid} = bitcast i8* %mm_b_row_slot_{b_row_uid} to i8**")
+            lines.append(f"  %mm_b_row_ptr_{b_row_uid} = load i8*, i8** %mm_b_row_slotp_{b_row_uid}, align 8")
+            lines.append(f"  %mm_b_row_data_{b_row_uid} = getelementptr i8, i8* %mm_b_row_ptr_{b_row_uid}, i64 8")
+            lines.append(f"  %mm_b_row_dptr_{b_row_uid} = bitcast i8* %mm_b_row_data_{b_row_uid} to double*")
+
+            a_ep_uid = self.new_id()
+            b_ep_uid = self.new_id()
+            sum_uid = self.new_id()
+            lines.append(f"  %mm_a_ep_{a_ep_uid} = getelementptr double, double* %mm_a_row_dptr_{a_row_byte_uid}, i64 %mm_k_v_{k_slot_uid}")
+            lines.append(f"  %mm_b_ep_{b_ep_uid} = getelementptr double, double* %mm_b_row_dptr_{b_row_uid}, i64 %mm_j_v_{j_slot_uid}")
+            lines.append(f"  %mm_a_val_{a_ep_uid} = load double, double* %mm_a_ep_{a_ep_uid}, align 8")
+            lines.append(f"  %mm_b_val_{b_ep_uid} = load double, double* %mm_b_ep_{b_ep_uid}, align 8")
+            lines.append(f"  %mm_mul_{sum_uid} = fmul fast double %mm_a_val_{a_ep_uid}, %mm_b_val_{b_ep_uid}")
+            lines.append(f"  %mm_sumv_{sum_uid} = load double, double* %mm_sum_{sum_slot_uid}, align 8")
+            lines.append(f"  %mm_sum2_{sum_uid} = fadd fast double %mm_sumv_{sum_uid}, %mm_mul_{sum_uid}")
+            lines.append(f"  store double %mm_sum2_{sum_uid}, double* %mm_sum_{sum_slot_uid}, align 8")
+            lines.append(f"  %mm_k_next_{k_slot_uid} = add nsw i64 %mm_k_v_{k_slot_uid}, 1")
+            lines.append(f"  store i64 %mm_k_next_{k_slot_uid}, i64* %mm_k_{k_slot_uid}, align 8")
+            lines.append(f"  br label %mm_k_cond_{uid}")
+
+            lines.append(f"mm_k_end_{uid}:")
+            out_elem_uid = self.new_id()
+            lines.append(f"  %mm_sum_final_{out_elem_uid} = load double, double* %mm_sum_{sum_slot_uid}, align 8")
+            lines.append(f"  %mm_out_elem_{out_elem_uid} = getelementptr double, double* %mm_row_dptr_{row_alloc_uid}, i64 %mm_j_v_{j_slot_uid}")
+            lines.append(f"  store double %mm_sum_final_{out_elem_uid}, double* %mm_out_elem_{out_elem_uid}, align 8")
+            lines.append(f"  %mm_j_next_{j_slot_uid} = add nsw i64 %mm_j_v_{j_slot_uid}, 1")
+            lines.append(f"  store i64 %mm_j_next_{j_slot_uid}, i64* %mm_j_{j_slot_uid}, align 8")
+            lines.append(f"  br label %mm_j_cond_{uid}")
+
+            lines.append(f"mm_j_end_{uid}:")
+            lines.append(f"  %mm_i_next_{i_slot_uid} = add nsw i64 %mm_i_v_{i_slot_uid}, 1")
+            lines.append(f"  store i64 %mm_i_next_{i_slot_uid}, i64* %mm_i_{i_slot_uid}, align 8")
+            lines.append(f"  br label %mm_i_cond_{uid}")
+
+            lines.append(f"mm_done_{uid}:")
+            return ("array", "double", 2), f"%mm_out_mem_{out_uid}"
 
         if name in ("upper", "lower"):
             t, sv = self.gen_expr(node.args[0], env, lines)
@@ -1909,10 +2630,17 @@ class CodeGen:
         for i, a in enumerate(node.args):
             t, v = self.gen_expr(a, env, lines)
             param_t = sig["params"][i]
+            if is_opaque_type(param_t):
+                if t != param_t:
+                    raise CompileError(
+                        f"'{name}': argumento {i + 1} esperado do tipo '{self.type_name(param_t)}', recebeu '{self.type_name(t)}'"
+                    )
+                arg_strs.append(f"i8* {v}")
+                continue
             if param_t == "str" or t == "str":
                 if t != param_t:
                     raise CompileError(
-                        f"'{name}': argumento {i + 1} esperado do tipo '{param_t}', recebeu '{t}'"
+                        f"'{name}': argumento {i + 1} esperado do tipo '{self.type_name(param_t)}', recebeu '{self.type_name(t)}'"
                     )
                 arg_strs.append(f"i8* {v}")
                 continue
@@ -2427,6 +3155,7 @@ class ReplSession:
         self.var_values = {}    # nome -> valor atual conhecido
         self.array_vars = set()  # variáveis que guardam array (não persistem)
         self.str_vars = set()    # variáveis do tipo string (também não persistem)
+        self.opaque_vars = set()  # arrays/structs nativos não persistem entre rounds
         self._imported_ay_files = set()  # caminhos absolutos de bibliotecas .ay já importadas na sessão
         self._gc_inited = False
 
@@ -2453,6 +3182,10 @@ class ReplSession:
                     "extern": False,
                 }
                 self.func_ir[s.name] = self.codegen.gen_function(s)
+            elif isinstance(s, StructDef):
+                if s.name in self.codegen.structs:
+                    raise CompileError(f"Struct '{s.name}' já foi declarada")
+                self.codegen.structs[s.name] = s.fields
             elif isinstance(s, ImportDecl):
                 if s.name not in self.codegen.imports:
                     self.codegen.imports.append(s.name)
@@ -2517,6 +3250,7 @@ class ReplSession:
                 else:
                     self.array_vars.discard(s.name)
                     self.str_vars.discard(s.name)
+                    self.opaque_vars.discard(s.name)
                     if isinstance(s.expr, Call) and s.expr.name == "array":
                         self.array_vars.add(s.name)
                         newly_non_persistent.append(s.name)
@@ -2524,10 +3258,18 @@ class ReplSession:
             # variáveis do tipo "str" só sabemos o tipo depois de gerar o
             # statement (é o gen_stmt que preenche env[name]); então marcamos
             # aqui, olhando o tipo já resolvido.
-            if isinstance(s, (VarDecl, Assign)) and env.get(s.name) == "str" and s.name not in self.str_vars:
-                self.str_vars.add(s.name)
-                if s.name not in newly_non_persistent:
-                    newly_non_persistent.append(s.name)
+            if isinstance(s, (VarDecl, Assign)):
+                t = env.get(s.name)
+                if t == "str" and s.name not in self.str_vars:
+                    self.str_vars.add(s.name)
+                    if s.name not in newly_non_persistent:
+                        newly_non_persistent.append(s.name)
+                elif is_opaque_type(t) and s.name not in self.opaque_vars:
+                    self.opaque_vars.add(s.name)
+                    if s.name not in newly_non_persistent:
+                        newly_non_persistent.append(s.name)
+                elif t == "i64" and s.name in self.array_vars:
+                    pass
 
         # strings e arrays não sobrevivem entre rounds do REPL: strings porque
         # não temos como serializar/desserializar um ponteiro i8* de um
@@ -2535,7 +3277,7 @@ class ReplSession:
         # motivo (o malloc do processo anterior já não existe mais). Excluir
         # os dois do rastreamento evita que o bug antigo aconteça de novo:
         # tentar ler a string de volta como número e ela sumir sem aviso.
-        trackable = [n for n in env if n not in self.array_vars and n not in self.str_vars]
+        trackable = [n for n in env if n not in self.array_vars and n not in self.str_vars and n not in self.opaque_vars]
         self.codegen.gen_stmt(Print(Str('"' + STATE_BEGIN + '"')), env, lines, "i32")
         for name in trackable:
             self.codegen.gen_stmt(Print(Var(name)), env, lines, "i32")
