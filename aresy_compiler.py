@@ -1205,6 +1205,20 @@ class CodeGen:
             return self.functions[node.name].get("ret", "i64")
         if isinstance(node, BinOp): return self._guess_type(node.left, known)
         if isinstance(node, UnaryOp): return self._guess_type(node.operand, known)
+        if isinstance(node, IndexGet):
+            # Espelha a resolução de tipo real do codegen de IndexGet
+            # (ver gen_expr): array de i64 -> i64; array 1D de double ->
+            # double; array 2D de double (dmat) -> devolve uma linha,
+            # ou seja, array 1D de double de novo.
+            base_t = self._guess_type(node.arr, known)
+            if base_t == "i64":
+                return "i64"
+            if is_array_type(base_t):
+                if base_t[1] == "double" and base_t[2] == 1:
+                    return "double"
+                if base_t[1] == "double" and base_t[2] == 2:
+                    return ("array", "double", 1)
+            return "i64"
         return "i64"
 
     _STR_BUILTIN_FIRST_ARG = {"upper", "lower", "len", "substr", "char_at"}
